@@ -1,0 +1,6 @@
+Metric,Base Mean,Base Std,Tool Mean,Tool Std,Overhead %,P-Value,Cohen's d,Significant?
+cycles,2207578300,904321,496900,425724,0.02251%,0.0000e+00,3122.79,YES
+cache-misses,21827228,254876,8912,2979,0.04083%,0.0000e+00,121.05,YES
+branch-misses,22023464,6754,3091,1035,0.01404%,0.0000e+00,4557.31,YES
+page-faults,0,0,85,23,N/A,0.0000e+00,5.07,YES
+context-switches,0,0,2,0,482.14286%,0.0000e+00,4.57,YES

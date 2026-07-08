@@ -1,0 +1,47 @@
+groups:
+  - name: application_alerts
+    rules:
+      # Alert 1: High tail latency
+      - alert: HighP99Latency
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(http_request_duration_seconds_bucket[2m])) by (le)
+          ) > 0.2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p99 latency exceeds 200ms"
+          description: "p99 latency is {{ $value | humanizeDuration }} over the last 2 minutes."
+
+      # Alert 2: CPU saturation
+      - alert: HighCPUUtilization
+        expr: >
+          100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU utilization above 80%"
+          description: "Average CPU utilization is {{ $value }}%"
+
+      # Alert 3: Application errors
+      - alert: HighErrorRate
+        expr: >
+          sum(rate(http_requests_total{status_code=~"5.."}[1m]))
+          / sum(rate(http_requests_total[1m])) * 100 > 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx error rate exceeds 1%"
+          description: "Error rate is {{ $value }}%"
+
+      # Alert 4: Database connection exhaustion
+      - alert: ConnectionPoolExhaustion
+        expr: pg_stat_activity_count > 90
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL active connections > 90"

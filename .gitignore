@@ -1,0 +1,59 @@
+# =============================================================
+# Performance Observatory — .gitignore
+# Worker 4: Orchestration
+# =============================================================
+
+# --- OS / Editor ---
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+*.iml
+
+# --- Go build artifacts ---
+*.exe
+*.exe~
+*.out
+/tmp/
+/bin/
+
+# --- Load test results ---
+results/
+!meta_profiling_deliverables/results/
+*.json.log
+*.csv
+!meta_profiling_deliverables/results/*.csv
+
+# --- perf artifacts (Phase 2) ---
+perf.data
+perf.data.old
+perf.data*
+*.perf
+flamegraph*.svg
+out.perf
+perf-*.html
+
+# --- Docker volumes (never commit these) ---
+postgres-data/
+prometheus-data/
+grafana-data/
+
+# --- k6 outputs ---
+summary.json
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Environment files (never commit secrets) ---
+.env
+.env.local
+.env.*.local
+
+# --- Miscellaneous temp files ---
+tmp/
+scratch/

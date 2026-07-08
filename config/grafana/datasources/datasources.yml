@@ -1,0 +1,21 @@
+# =============================================================
+# Grafana Datasource Provisioning
+# Worker 4: Orchestration
+# =============================================================
+# Automatically connects Grafana to Prometheus on startup.
+# No manual datasource configuration needed.
+# =============================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090   # Docker service name (within perf-net)
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: "15s"         # Match global scrape_interval
+      httpMethod: POST

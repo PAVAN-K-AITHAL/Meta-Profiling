@@ -1,0 +1,67 @@
+# =============================================================
+# Prometheus Configuration — Performance Observatory
+# Worker 4: Orchestration
+# =============================================================
+# Scrapes: go-api (:8080), nginx-exporter (:9113), postgres-exporter (:9187)
+# Phase 2 will add: proc-exporter (:9100), ebpf-exporter (:9200)
+# Hot-reload: curl -X POST http://localhost:9090/-/reload
+# =============================================================
+
+global:
+  scrape_interval:     15s   # Default: scrape every 15 seconds
+  evaluation_interval: 15s   # Evaluate alerting rules every 15 seconds
+  scrape_timeout:      10s   # Timeout per scrape
+
+# Alert rules — created by Worker 3
+rule_files:
+  - "alert_rules.yml"
+
+# =============================================================
+# Scrape Configurations
+# =============================================================
+scrape_configs:
+
+  # --- Go REST API ---
+  # Exposes RED metrics + pprof (defined in Worker 1's middleware/metrics.go)
+  # Metrics: http_requests_total, http_request_duration_seconds,
+  #          http_requests_in_flight, db_query_duration_seconds
+  - job_name: 'go-api'
+    static_configs:
+      - targets: ['go-api:8080']
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # --- Nginx Prometheus Exporter ---
+  # Scrapes /nginx_status from nginx and exposes as Prometheus metrics
+  # Metrics: nginx_connections_active, nginx_connections_accepted,
+  #          nginx_http_requests_total, etc.
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+    scrape_interval: 15s
+
+  # --- PostgreSQL Exporter ---
+  # Exposes pg_stat_* views as Prometheus metrics
+  # Metrics: pg_stat_activity_count, pg_stat_database_*, pg_stat_user_tables_*
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    scrape_interval: 15s
+
+  # =============================================================
+  # Phase 2 — Instrumentation Layer (uncomment when ready)
+  # =============================================================
+
+  # --- Custom /proc Exporter (FR-2) ---
+  # Reads /proc/stat, /proc/meminfo, /proc/diskstats, /proc/net/dev, etc.
+  # - job_name: 'proc-exporter'
+  #   static_configs:
+  #     - targets: ['proc-exporter:9100']
+  #   scrape_interval: 15s   # Can be reduced to 1s for overhead experiments
+
+  # --- eBPF Exporter (FR-5) ---
+  # Kernel-level tracing: context switches, page faults, CPU migrations
+  # - job_name: 'ebpf-exporter'
+  #   static_configs:
+  #     - targets: ['ebpf-exporter:9200']
+  #   scrape_interval: 15s
