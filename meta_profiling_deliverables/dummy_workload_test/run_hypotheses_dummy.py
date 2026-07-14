@@ -137,7 +137,7 @@ class ResultsWriter:
     FIELDNAMES = [
         "session_id", "timestamp", "hypothesis", "workload", "config_g",
         "config_c", "iteration", "run_type",
-        "cycles", "cache_misses", "l1d_misses", "branch_misses",
+        "cycles", "cache_misses", "branch_misses",
         "page_faults", "context_switches"
     ]
 
@@ -161,7 +161,6 @@ class ResultsWriter:
             "run_type": run_type,
             "cycles": results.get("cycles", 0),
             "cache_misses": results.get("cache-misses", 0),
-            "l1d_misses": results.get("L1-dcache-load-misses", 0),
             "branch_misses": results.get("branch-misses", 0),
             "page_faults": results.get("page-faults", 0),
             "context_switches": results.get("context-switches", 0),

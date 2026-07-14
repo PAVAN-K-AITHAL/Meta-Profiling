@@ -141,7 +141,7 @@ def analyze_h1(dummy_df, goapi_df=None):
         report_lines.append("⚠️ No H1 data found in dummy CSV.\n")
         return results, report_lines
 
-    metrics = ['cycles', 'cache_misses', 'l1d_misses', 'branch_misses', 'context_switches']
+    metrics = ['cycles', 'cache_misses', 'branch_misses', 'context_switches']
 
     if goapi_df is not None:
         h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
@@ -229,7 +229,7 @@ def analyze_h2(dummy_df):
         report_lines.append("⚠️ No H2 data found.\n")
         return results, report_lines
 
-    metrics = ['cycles', 'cache_misses', 'l1d_misses', 'branch_misses']
+    metrics = ['cycles', 'cache_misses', 'branch_misses']
 
     for metric in metrics:
         report_lines.append(f"### {metric}")
@@ -330,7 +330,7 @@ def analyze_h3(dummy_df):
     with_g = h3_data[h3_data['config_g'] == 'on']
     without_g = h3_data[h3_data['config_g'] == 'off']
 
-    metrics = ['cycles', 'cache_misses', 'l1d_misses', 'branch_misses', 'context_switches']
+    metrics = ['cycles', 'cache_misses', 'branch_misses', 'context_switches']
 
     report_lines.append("| Metric | With -g (mean) | Without -g (mean) | Diff | Diff % | p-value | Cohen's d | Significant? |")
     report_lines.append("|--------|---------------|------------------|------|--------|---------|-----------|-------------|")
@@ -423,7 +423,7 @@ def analyze_h4(goapi_df):
     baseline = h4_data[h4_data['run_type'] == 'baseline']
     profiled = h4_data[h4_data['run_type'] == 'profiled']
 
-    metrics = ['cycles', 'cache_misses', 'l1d_misses', 'branch_misses', 'context_switches']
+    metrics = ['cycles', 'cache_misses', 'branch_misses', 'context_switches']
 
     report_lines.append("| Metric | Baseline Mean | Profiled Mean | Overhead | Overhead % | TOST p | 90% CI | < 1%? |")
     report_lines.append("|--------|-------------|--------------|----------|-----------|--------|--------|-------|")

@@ -20,12 +20,6 @@ hardware:cache-misses:1000
     @cache_misses++;
 }
 
-hardware:L1-dcache-load-misses:10000
-/pid == $1/
-{
-    @l1d_misses++;
-}
-
 hardware:branch-misses:1000
 /pid == $1/
 {

@@ -56,7 +56,6 @@ EBPF_INFINITE = os.path.join(
 PERIODS = {
     "@cycles": 100000,
     "@cache_misses": 1000,
-    "@l1d_misses": 10000,
     "@branch_misses": 1000,
     "@page_faults": 1,
     "@ctx_switches": 1,
@@ -128,7 +127,6 @@ def parse_bpftrace_map_dump(output):
     metric_map = {
         "@cycles": "cycles",
         "@cache_misses": "cache-misses",
-        "@l1d_misses": "L1-dcache-load-misses",
         "@branch_misses": "branch-misses",
         "@page_faults": "page-faults",
         "@ctx_switches": "context-switches",
@@ -177,7 +175,7 @@ class ResultsWriter:
     FIELDNAMES = [
         "session_id", "timestamp", "hypothesis", "workload", "config_g",
         "config_c", "iteration", "run_type",
-        "cycles", "cache_misses", "l1d_misses", "branch_misses",
+        "cycles", "cache_misses", "branch_misses",
         "page_faults", "context_switches", "requests_served"
     ]
 
@@ -201,7 +199,6 @@ class ResultsWriter:
             "run_type": run_type,
             "cycles": results.get("cycles", 0),
             "cache_misses": results.get("cache-misses", 0),
-            "l1d_misses": results.get("L1-dcache-load-misses", 0),
             "branch_misses": results.get("branch-misses", 0),
             "page_faults": results.get("page-faults", 0),
             "context_switches": results.get("context-switches", 0),

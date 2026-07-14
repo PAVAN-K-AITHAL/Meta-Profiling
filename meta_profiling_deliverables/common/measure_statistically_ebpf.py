@@ -40,7 +40,7 @@ from scipy import stats
 EBPF_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ebpf_counter.bt")
 
 # Metrics tracked (must match ebpf_counter.bt output)
-METRICS = ["cycles", "cache-misses", "L1-dcache-load-misses", "branch-misses", "page-faults", "context-switches"]
+METRICS = ["cycles", "cache-misses", "branch-misses", "page-faults", "context-switches"]
 
 # CPU pinning for isolated cores on this system
 BPFTRACE_CPU = "14"       # Outer measurement — bpftrace
