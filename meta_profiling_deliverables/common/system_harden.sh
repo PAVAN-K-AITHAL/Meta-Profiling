@@ -82,6 +82,8 @@ check_state() {
     echo ""
     if command -v lat_mem_rd &>/dev/null; then
         ok "lmbench: lat_mem_rd found at $(which lat_mem_rd)"
+    elif [ -f /usr/lib/lmbench/bin/x86_64-linux-gnu/lat_mem_rd ]; then
+        ok "lmbench: lat_mem_rd found at /usr/lib/lmbench/bin/x86_64-linux-gnu/lat_mem_rd"
     else
         fail "lmbench: lat_mem_rd NOT found — install with: sudo apt install lmbench"
     fi

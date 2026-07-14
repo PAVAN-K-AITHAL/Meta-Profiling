@@ -75,10 +75,16 @@ def start_workload():
     time.sleep(0.3)
 
     # Try lat_mem_rd first (lmbench)
+    lat_mem_cmd = None
     if run_cmd("which lat_mem_rd").returncode == 0:
+        lat_mem_cmd = "lat_mem_rd"
+    elif os.path.exists("/usr/lib/lmbench/bin/x86_64-linux-gnu/lat_mem_rd"):
+        lat_mem_cmd = "/usr/lib/lmbench/bin/x86_64-linux-gnu/lat_mem_rd"
+
+    if lat_mem_cmd:
         # lat_mem_rd -t <array_size_MB> <stride_bytes>
         # 128M array defeats prefetchers, 512-byte stride
-        run_cmd(f"taskset -c {WORKLOAD_CPU} lat_mem_rd -t 128M 512 > /dev/null 2>&1 &")
+        run_cmd(f"taskset -c {WORKLOAD_CPU} {lat_mem_cmd} -t 128M 512 > /dev/null 2>&1 &")
         time.sleep(2)
         res = run_cmd("pgrep -x lat_mem_rd | head -n 1")
         pid = res.stdout.strip()
