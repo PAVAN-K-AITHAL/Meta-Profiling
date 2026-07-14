@@ -87,6 +87,22 @@ all:
 	@echo "  Results: $(RESULTS_FILE)"
 	@echo "=================================================================="
 
+# ---------------------------------------------------------------------------
+# Hypothesis Testing: H1 + H4 (200 iterations, constant work)
+# ---------------------------------------------------------------------------
+test-hypotheses:
+	@echo "=================================================================="
+	@echo "  Hypothesis Testing — H1 + H4 ($(ITERATIONS) iterations)"
+	@echo "  Constant work: 1000 requests per iteration"
+	@echo "=================================================================="
+	sudo python3 run_hypotheses_goapi.py --iterations $(ITERATIONS)
+
+test-pilot:
+	@echo "=================================================================="
+	@echo "  Pilot Run — 50 iterations (Go API)"
+	@echo "=================================================================="
+	sudo python3 run_hypotheses_goapi.py --pilot
+
 clean:
 	@echo "Cleaning up..."
 	@kill $$(cat /tmp/k6_pid.txt) 2>/dev/null || true

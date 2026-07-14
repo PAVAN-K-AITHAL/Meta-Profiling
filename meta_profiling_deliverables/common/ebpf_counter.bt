@@ -10,11 +10,19 @@
  *       Uses interval:s:1 for countdown and CSV output instead.
  *
  * Sampling periods (events between probe firings):
- *   cycles:           100,000   (extrapolate: count × 100,000)
- *   cache-misses:       1,000   (extrapolate: count ×   1,000)
- *   branch-misses:      1,000   (extrapolate: count ×   1,000)
- *   page-faults:            1   (exact count)
- *   context-switches:       1   (exact count)
+ *   cycles:                    100,000   (extrapolate: count × 100,000)
+ *   cache-misses:                1,000   (extrapolate: count ×   1,000)  [LLC/L3]
+ *   L1-dcache-load-misses:     10,000   (extrapolate: count ×  10,000)  [L1d]
+ *   branch-misses:              1,000   (extrapolate: count ×   1,000)
+ *   page-faults:                    1   (exact count)
+ *   context-switches:               1   (exact count)
+ *
+ * PMU counter budget (Broadwell, 4 GP + 3 fixed):
+ *   cycles        → fixed counter #0 (free)
+ *   cache-misses  → GP #1
+ *   L1-dcache-load-misses → GP #2
+ *   branch-misses → GP #3
+ *   page-faults, context-switches → software (no PMU)
  *
  * Output format (between CSV_START / CSV_END markers):
  *   <metric>,<raw_overflow_count>,<period>
@@ -40,6 +48,12 @@ hardware:cache-misses:1000
 /pid == $1/
 {
     @cache_misses++;
+}
+
+hardware:L1-dcache-load-misses:10000
+/pid == $1/
+{
+    @l1d_misses++;
 }
 
 hardware:branch-misses:1000
@@ -75,15 +89,17 @@ interval:s:1
     @ticks++;
     if (@ticks >= $2) {
         printf("\nCSV_START\n");
-        printf("cycles,%d,100000\n",           @cycles);
-        printf("cache-misses,%d,1000\n",       @cache_misses);
-        printf("branch-misses,%d,1000\n",      @branch_misses);
-        printf("page-faults,%d,1\n",           @page_faults);
-        printf("context-switches,%d,1\n",      @ctx_switches);
+        printf("cycles,%d,100000\n",                  @cycles);
+        printf("cache-misses,%d,1000\n",              @cache_misses);
+        printf("L1-dcache-load-misses,%d,10000\n",    @l1d_misses);
+        printf("branch-misses,%d,1000\n",             @branch_misses);
+        printf("page-faults,%d,1\n",                  @page_faults);
+        printf("context-switches,%d,1\n",             @ctx_switches);
         printf("CSV_END\n");
 
         clear(@cycles);
         clear(@cache_misses);
+        clear(@l1d_misses);
         clear(@branch_misses);
         clear(@page_faults);
         clear(@ctx_switches);
