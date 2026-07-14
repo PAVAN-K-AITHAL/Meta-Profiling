@@ -40,7 +40,7 @@ from datetime import datetime
 
 # Add common/ to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'common'))
-from measure_statistically_ebpf import run_bpftrace, METRICS, format_number
+from measure_statistically_ebpf import run_bpftrace_cpu, METRICS, format_number
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -221,15 +221,12 @@ class ResultsWriter:
 def measure_workload(duration):
     """Measure the WORKLOAD's hardware counters via bpftrace.
     
-    We measure the workload PID (on CPU 6), not perf record's PID.
+    We measure the workload CPU (CPU 6), not perf record's PID.
     This is the correct approach — perf record perturbs the workload,
     so we measure that perturbation by comparing workload counters
     with and without perf record running.
     """
-    wl_pid = refresh_workload_pid()
-    if not wl_pid:
-        return None
-    return run_bpftrace(wl_pid, duration)
+    return run_bpftrace_cpu(WORKLOAD_CPU, duration)
 
 
 # ---------------------------------------------------------------------------
@@ -420,16 +417,9 @@ def main():
         return
     print(f"  Workload: {workload_name} (PID {workload_pid}, CPU {WORKLOAD_CPU})")
 
-    # Sanity check: verify bpftrace can measure this PID
-    print(f"\n  Sanity check: running bpftrace for 2s against PID {workload_pid}...")
-    test_result = run_bpftrace(workload_pid, 2)
-    if not test_result:
-        # The PID may have changed (lat_mem_rd loop), try refreshing
-        new_pid = refresh_workload_pid()
-        if new_pid:
-            workload_pid = new_pid
-            print(f"  Refreshed PID to {workload_pid}, retrying...")
-            test_result = run_bpftrace(workload_pid, 2)
+    # Sanity check: verify bpftrace can measure this CPU
+    print(f"\n  Sanity check: running bpftrace for 2s against CPU {WORKLOAD_CPU}...")
+    test_result = run_bpftrace_cpu(WORKLOAD_CPU, 2)
     
     if test_result:
         print(f"  ✅ Sanity check PASSED — got {len(test_result)} metrics")
@@ -439,7 +429,6 @@ def main():
         print("  ❌ Sanity check FAILED — bpftrace returned no data.")
         print("  Possible causes:")
         print("    - bpftrace cannot attach hardware probes (check: sudo bpftrace -l 'hardware:*')")
-        print("    - The workload PID died before bpftrace could measure it")
         print("  Aborting.")
         stop_workload(workload_name)
         return

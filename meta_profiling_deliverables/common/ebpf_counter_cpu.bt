@@ -1,0 +1,105 @@
+#!/usr/bin/env bpftrace
+/*
+ * ebpf_counter_cpu.bt — Timed eBPF hardware/software event counter (CPU-based)
+ *
+ * Usage: sudo bpftrace ebpf_counter_cpu.bt <CPU_ID> <DURATION_SECONDS>
+ *
+ * This variant filters by CPU ID instead of PID. Use this when the target
+ * workload runs on an isolated CPU (isolcpus) and its PID may change
+ * (e.g., lat_mem_rd in a while-true loop). Since the CPU is isolated,
+ * only the target workload runs there, making CPU filtering equivalent
+ * to PID filtering but immune to PID churn.
+ *
+ * NOTE: Deliberately avoids BEGIN/END probes to work around the
+ *       "Could not resolve symbol: /proc/self/exe:BEGIN_trigger"
+ *       bug in bpftrace 0.14.0 (Ubuntu 22.04 stripped binary).
+ *       Uses interval:s:1 for countdown and CSV output instead.
+ *
+ * Sampling periods (events between probe firings):
+ *   cycles:                    100,000   (extrapolate: count × 100,000)
+ *   cache-misses:                1,000   (extrapolate: count ×   1,000)  [LLC/L3]
+ *   branch-misses:              1,000   (extrapolate: count ×   1,000)
+ *   page-faults:                    1   (exact count)
+ *   context-switches:               1   (exact count)
+ *
+ * PMU counter budget (Broadwell, 4 GP + 3 fixed):
+ *   cycles        → fixed counter #0 (free)
+ *   cache-misses  → GP #1
+ *   branch-misses → GP #2
+ *   page-faults, context-switches → software (no PMU)
+ *
+ * Output format (between CSV_START / CSV_END markers):
+ *   <metric>,<raw_overflow_count>,<period>
+ *
+ * The caller multiplies count × period to get the extrapolated value.
+ * Software events (period=1) are exact counts with zero extrapolation error.
+ */
+
+/*
+ * Hardware events — overflow-based sampling.
+ * The probe fires every <period> events. We count overflows and
+ * multiply by the period to extrapolate the total.
+ * CPU filter ensures we only count events on the isolated target CPU.
+ */
+
+hardware:cycles:100000
+/cpu == $1/
+{
+    @cycles++;
+}
+
+hardware:cache-misses:1000
+/cpu == $1/
+{
+    @cache_misses++;
+}
+
+hardware:branch-misses:1000
+/cpu == $1/
+{
+    @branch_misses++;
+}
+
+/*
+ * Software events — exact counting (period = 1).
+ * Every single event triggers the probe, so the count is exact.
+ */
+
+software:page-faults:1
+/cpu == $1/
+{
+    @page_faults++;
+}
+
+software:context-switches:1
+/cpu == $1/
+{
+    @ctx_switches++;
+}
+
+/*
+ * Timer — fires every second.
+ * After $2 seconds: prints CSV output, clears all maps, exits.
+ * Clearing maps before exit() prevents bpftrace's default map dump.
+ */
+interval:s:1
+{
+    @ticks++;
+    if (@ticks >= $2) {
+        printf("\nCSV_START\n");
+        printf("cycles,%d,100000\n",                  @cycles);
+        printf("cache-misses,%d,1000\n",              @cache_misses);
+        printf("branch-misses,%d,1000\n",             @branch_misses);
+        printf("page-faults,%d,1\n",                  @page_faults);
+        printf("context-switches,%d,1\n",             @ctx_switches);
+        printf("CSV_END\n");
+
+        clear(@cycles);
+        clear(@cache_misses);
+        clear(@branch_misses);
+        clear(@page_faults);
+        clear(@ctx_switches);
+        clear(@ticks);
+        exit();
+    }
+}

@@ -36,8 +36,9 @@ from scipy import stats
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Path to the eBPF counter script (same directory as this script)
+# Path to the eBPF counter scripts (same directory as this script)
 EBPF_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ebpf_counter.bt")
+EBPF_SCRIPT_CPU = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ebpf_counter_cpu.bt")
 
 # Metrics tracked (must match ebpf_counter.bt output)
 METRICS = ["cycles", "cache-misses", "branch-misses", "page-faults", "context-switches"]
@@ -121,6 +122,19 @@ def run_bpftrace(pid, duration):
     cmd = f"sudo bpftrace {EBPF_SCRIPT} {pid} {duration}"
     # bpftrace needs time to compile BPF bytecode on first run (~5-10s),
     # plus the actual measurement duration, plus cleanup time.
+    timeout = duration + 45
+    res = run_cmd(cmd, timeout=timeout)
+    if res.returncode != 0:
+        return {}
+    return parse_bpftrace_output(res.stdout)
+
+
+def run_bpftrace_cpu(cpu_id, duration):
+    """Run the eBPF counter script against a specific CPU for a given duration.
+
+    Returns parsed results dict or empty dict on failure.
+    """
+    cmd = f"sudo bpftrace {EBPF_SCRIPT_CPU} {cpu_id} {duration}"
     timeout = duration + 45
     res = run_cmd(cmd, timeout=timeout)
     if res.returncode != 0:
