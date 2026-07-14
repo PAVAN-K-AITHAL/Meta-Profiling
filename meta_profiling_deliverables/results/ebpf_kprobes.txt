@@ -1,0 +1,44 @@
+user@worker-3:~/Performance_Analysis/meta_profiling_deliverables$ sudo ./kprobe_analyze.sh
+================================================================
+  eBPF Kprobe Diagnostic: Profiler Latency Analysis
+================================================================
+[+] Started target dummy workload on CPU 6 (PID: 1979613)
+[+] Starting bpftrace and attaching probes...
+[+] Started perf record on CPU 7. Capturing data...
+[+] Trace complete. Stopping processes...
+./kprobe_analyze.sh: line 38: 1979613 Killed                  taskset -c 6 ./dummy_workload > /dev/null
+./kprobe_analyze.sh: line 38: 1979656 Killed                  taskset -c 7 perf record -g -e cycles:k -c 100000 -p $WORKLOAD_PID -o /tmp/kprobe-perf.data 2> /dev/null
+Attaching 8 probes...
+
+
+@lat_kallsyms_ns: 
+[256, 512)        484480 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[512, 1K)         104859 |@@@@@@@@@@@                                         |
+[1K, 2K)            1429 |                                                    |
+[2K, 4K)             202 |                                                    |
+[4K, 8K)              66 |                                                    |
+[8K, 16K)            266 |                                                    |
+[16K, 32K)           136 |                                                    |
+
+@lat_mmap_ns: 
+[1K, 2K)            7671 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[2K, 4K)             549 |@@@                                                 |
+[4K, 8K)               9 |                                                    |
+[8K, 16K)              6 |                                                    |
+[16K, 32K)            21 |                                                    |
+
+@lat_nmi_ns: 
+[1K, 2K)               8 |@@@@@@                                              |
+[2K, 4K)              67 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+[4K, 8K)              21 |@@@@@@@@@@@@@@@@                                    |
+[8K, 16K)              0 |                                                    |
+[16K, 32K)             6 |@@@@                                                |
+
+
+
+
+
+
+================================================================
+  ✅ Kprobe Analysis Finished!
+================================================================

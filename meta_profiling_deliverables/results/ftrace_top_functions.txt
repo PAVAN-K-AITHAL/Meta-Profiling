@@ -1,0 +1,30 @@
+  217139.462 us  (449084 calls)  seq_printf
+  142459.874 us  (414350 calls)  kallsyms_expand_symbol.constprop.0
+   29327.728 us  ( 34573 calls)  update_iter_mod
+   28623.854 us  (110493 calls)  make_vfsuid
+   27850.602 us  ( 96969 calls)  __rcu_read_unlock
+   27763.804 us  ( 96727 calls)  __rcu_read_lock
+   25296.636 us  ( 88628 calls)  __cond_resched
+   21178.892 us  ( 81430 calls)  security_inode_permission
+   19587.518 us  (  8252 calls)  perf_mmap_alloc_page
+   19569.452 us  ( 68895 calls)  __d_lookup_rcu
+   14839.825 us  (   722 calls)  __sysvec_apic_timer_interrupt
+   13785.595 us  (   697 calls)  hrtimer_interrupt
+   12506.420 us  ( 47734 calls)  step_into
+    7604.301 us  (   398 calls)  __hrtimer_run_queues
+    6670.659 us  ( 21317 calls)  up_read
+    6548.912 us  ( 24233 calls)  should_failslab.constprop.0
+    6266.998 us  ( 23386 calls)  fpregs_assert_state_consistent
+    6133.408 us  (  6152 calls)  pick_link
+    6030.149 us  ( 19103 calls)  _raw_spin_lock
+    5988.609 us  ( 22080 calls)  syscall_exit_to_user_mode_prepare
+    5541.220 us  ( 18855 calls)  _raw_spin_unlock
+    5249.836 us  (   285 calls)  unmap_page_range
+    5228.549 us  ( 17952 calls)  mutex_unlock
+    5109.667 us  (  1098 calls)  fsnotify_insert_event
+    4396.549 us  ( 12075 calls)  kmem_cache_free
+    4350.388 us  ( 16877 calls)  is_vmalloc_addr
+    4167.535 us  (  8728 calls)  down_read
+    4063.354 us  ( 15226 calls)  __lookup_mnt
+    4049.785 us  ( 14652 calls)  __check_heap_object
+    3966.568 us  ( 14815 calls)  __virt_addr_valid
