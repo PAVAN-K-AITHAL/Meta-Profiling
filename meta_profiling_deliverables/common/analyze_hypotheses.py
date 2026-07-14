@@ -124,6 +124,7 @@ def normality_check(data, alpha=0.05):
 def analyze_h1(dummy_df, goapi_df=None):
     """H1: Is perf record's overhead constant across workloads?
     
+    Overhead = profiled_workload_counters - baseline_workload_counters.
     Test: Welch's ANOVA across workload groups
     Equivalence: TOST with Δ = 10% of grand mean
     """
@@ -143,64 +144,131 @@ def analyze_h1(dummy_df, goapi_df=None):
 
     metrics = ['cycles', 'cache_misses', 'branch_misses', 'context_switches']
 
-    if goapi_df is not None:
-        h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
-        groups = {
-            'dummy': h1_data,
-            'goapi': h1_goapi,
-        }
-    else:
-        groups = {'dummy': h1_data}
+    # Compute per-iteration overhead for the dummy workload
+    baseline_dummy = h1_data[h1_data['run_type'] == 'baseline']
+    profiled_dummy = h1_data[h1_data['run_type'] == 'profiled']
 
-    report_lines.append("| Metric | Group | N | Mean | Std | Cohen's d | ANOVA p | TOST p | Equivalent? |")
-    report_lines.append("|--------|-------|---|------|-----|-----------|---------|--------|-------------|")
+    # Also check for legacy 'tool_overhead' run_type
+    if baseline_dummy.empty and profiled_dummy.empty:
+        tool_overhead = h1_data[h1_data['run_type'] == 'tool_overhead']
+        if not tool_overhead.empty:
+            # Legacy format — use raw values directly
+            groups = {'dummy': tool_overhead}
+            if goapi_df is not None:
+                h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
+                goapi_tool = h1_goapi[h1_goapi['run_type'] == 'tool_overhead']
+                if not goapi_tool.empty:
+                    groups['goapi'] = goapi_tool
+        else:
+            report_lines.append("⚠️ No baseline/profiled data found for H1.\n")
+            return results, report_lines
+    else:
+        # New format: compute overhead = profiled - baseline per iteration
+        groups = {}
+        
+        # Dummy workload overhead
+        dummy_overheads = {}
+        for metric in metrics:
+            b_vals = baseline_dummy.groupby('iteration')[metric].mean()
+            p_vals = profiled_dummy.groupby('iteration')[metric].mean()
+            common_iters = b_vals.index.intersection(p_vals.index)
+            if len(common_iters) > 0:
+                overhead_series = p_vals.loc[common_iters] - b_vals.loc[common_iters]
+                dummy_overheads[metric] = overhead_series.values
+        if dummy_overheads:
+            groups['dummy'] = dummy_overheads
+
+        # Go API overhead (if provided)
+        if goapi_df is not None:
+            h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
+            if not h1_goapi.empty:
+                goapi_baseline = h1_goapi[h1_goapi['run_type'] == 'baseline']
+                goapi_profiled = h1_goapi[h1_goapi['run_type'] == 'profiled']
+                goapi_overheads = {}
+                for metric in metrics:
+                    b_vals = goapi_baseline.groupby('iteration')[metric].mean()
+                    p_vals = goapi_profiled.groupby('iteration')[metric].mean()
+                    common_iters = b_vals.index.intersection(p_vals.index)
+                    if len(common_iters) > 0:
+                        overhead_series = p_vals.loc[common_iters] - b_vals.loc[common_iters]
+                        goapi_overheads[metric] = overhead_series.values
+                if goapi_overheads:
+                    groups['goapi'] = goapi_overheads
+
+    # Report: descriptive stats + overhead comparison
+    report_lines.append("### Baseline vs Profiled (Workload Perturbation)")
+    report_lines.append("")
+    report_lines.append("| Metric | Baseline Mean | Profiled Mean | Overhead | Overhead % |")
+    report_lines.append("|--------|-------------|--------------|----------|-----------|")
 
     for metric in metrics:
-        group_data = {}
-        for name, df in groups.items():
-            vals = df[metric].dropna().values.astype(float)
-            if len(vals) > 0:
-                group_data[name] = vals
+        b_vals = baseline_dummy[metric].dropna().values.astype(float)
+        p_vals = profiled_dummy[metric].dropna().values.astype(float)
+        if len(b_vals) > 0 and len(p_vals) > 0:
+            b_mean = np.mean(b_vals)
+            p_mean = np.mean(p_vals)
+            overhead = p_mean - b_mean
+            overhead_pct = (overhead / b_mean * 100) if b_mean > 0 else 0
+            report_lines.append(
+                f"| {metric} | {fmt(b_mean)} | {fmt(p_mean)} | "
+                f"{fmt(abs(overhead))} | {overhead_pct:+.4f}% |"
+            )
+    report_lines.append("")
 
-        if len(group_data) < 2:
-            # Single group — just report descriptive stats
+    # Cross-workload comparison (if we have multiple groups)
+    if len(groups) >= 2 and isinstance(list(groups.values())[0], dict):
+        report_lines.append("### Cross-Workload Overhead Comparison")
+        report_lines.append("")
+        report_lines.append("| Metric | Group | N | Mean Overhead | Std | Cohen's d | ANOVA p | TOST p | Equivalent? |")
+        report_lines.append("|--------|-------|---|--------------|-----|-----------|---------|--------|-------------|")
+
+        for metric in metrics:
+            group_data = {}
+            for name, data_dict in groups.items():
+                if metric in data_dict:
+                    vals = data_dict[metric]
+                    if len(vals) > 0:
+                        group_data[name] = vals
+
+            if len(group_data) < 2:
+                for name, vals in group_data.items():
+                    report_lines.append(
+                        f"| {metric} | {name} | {len(vals)} | {fmt(np.mean(vals))} | "
+                        f"{fmt(np.std(vals, ddof=1))} | — | — | — | Single group |"
+                    )
+                continue
+
+            all_groups = list(group_data.values())
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                if len(all_groups) == 2:
+                    t_stat, anova_p = stats.ttest_ind(all_groups[0], all_groups[1], equal_var=False)
+                else:
+                    anova_p = stats.f_oneway(*all_groups).pvalue
+
+            if len(all_groups) == 2:
+                tost_p, _, _, ci_lo, ci_hi, delta = tost_test(
+                    all_groups[0], all_groups[1], 0.10
+                )
+                d = cohens_d(all_groups[0], all_groups[1])
+                equiv = "✅ YES" if tost_p < 0.05 else "❌ NO"
+            else:
+                tost_p = float('nan')
+                d = 0
+                equiv = "—"
+
+            results.append({"test": "H1", "metric": metric, "p_value": anova_p, "test_type": "ANOVA"})
+            results.append({"test": "H1", "metric": metric, "p_value": tost_p, "test_type": "TOST"})
+
             for name, vals in group_data.items():
                 report_lines.append(
                     f"| {metric} | {name} | {len(vals)} | {fmt(np.mean(vals))} | "
-                    f"{fmt(np.std(vals, ddof=1))} | — | — | — | Single group |"
+                    f"{fmt(np.std(vals, ddof=1))} | {d:.2f} | {anova_p:.4e} | "
+                    f"{tost_p:.4e} | {equiv} |"
                 )
-            continue
-
-        # Welch's ANOVA (two groups → simplifies to Welch's t-test)
-        all_groups = list(group_data.values())
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            if len(all_groups) == 2:
-                t_stat, anova_p = stats.ttest_ind(all_groups[0], all_groups[1], equal_var=False)
-            else:
-                anova_p = stats.f_oneway(*all_groups).pvalue
-
-        # TOST equivalence (10% of grand mean)
-        if len(all_groups) == 2:
-            tost_p, _, _, ci_lo, ci_hi, delta = tost_test(
-                all_groups[0], all_groups[1], 0.10
-            )
-            d = cohens_d(all_groups[0], all_groups[1])
-            equiv = "✅ YES" if tost_p < 0.05 else "❌ NO"
-        else:
-            tost_p = float('nan')
-            d = 0
-            equiv = "—"
-
-        results.append({"test": "H1", "metric": metric, "p_value": anova_p, "test_type": "ANOVA"})
-        results.append({"test": "H1", "metric": metric, "p_value": tost_p, "test_type": "TOST"})
-
-        for name, vals in group_data.items():
-            report_lines.append(
-                f"| {metric} | {name} | {len(vals)} | {fmt(np.mean(vals))} | "
-                f"{fmt(np.std(vals, ddof=1))} | {d:.2f} | {anova_p:.4e} | "
-                f"{tost_p:.4e} | {equiv} |"
-            )
+    elif len(groups) == 1:
+        report_lines.append("> ℹ️ Only one workload group available. Run Go API experiments")
+        report_lines.append("> to enable cross-workload comparison (H1 requires ≥2 groups).")
 
     report_lines.append("")
     return results, report_lines
@@ -229,6 +297,11 @@ def analyze_h2(dummy_df):
         report_lines.append("⚠️ No H2 data found.\n")
         return results, report_lines
 
+    # Use only profiled rows (or tool_overhead for legacy format)
+    h2_profiled = h2_data[h2_data['run_type'].isin(['profiled', 'tool_overhead'])]
+    if h2_profiled.empty:
+        h2_profiled = h2_data  # fallback: use all rows
+
     metrics = ['cycles', 'cache_misses', 'branch_misses']
 
     for metric in metrics:
@@ -236,7 +309,7 @@ def analyze_h2(dummy_df):
         report_lines.append("")
 
         # Group by sampling period
-        grouped = h2_data.groupby('config_c')[metric].apply(list).to_dict()
+        grouped = h2_profiled.groupby('config_c')[metric].apply(list).to_dict()
 
         # Build regression data
         x_vals = []  # sampling frequency = 1/c
@@ -327,8 +400,13 @@ def analyze_h3(dummy_df):
         report_lines.append("⚠️ No H3 data found.\n")
         return results, report_lines
 
-    with_g = h3_data[h3_data['config_g'] == 'on']
-    without_g = h3_data[h3_data['config_g'] == 'off']
+    # Use only profiled rows (or tool_overhead for legacy format)
+    h3_profiled = h3_data[h3_data['run_type'].isin(['profiled', 'tool_overhead'])]
+    if h3_profiled.empty:
+        h3_profiled = h3_data  # fallback
+
+    with_g = h3_profiled[h3_profiled['config_g'] == 'on']
+    without_g = h3_profiled[h3_profiled['config_g'] == 'off']
 
     metrics = ['cycles', 'cache_misses', 'branch_misses', 'context_switches']
 
