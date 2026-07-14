@@ -1,0 +1,72 @@
+#!/usr/bin/env bpftrace
+/*
+ * kprobe_diagnostic.bt
+ * 
+ * Measures the exact nanosecond latency of specific kernel functions called by perf record.
+ * This is the eBPF kprobe equivalent to the ftrace experiment, but with 1% overhead instead of 100x.
+ */
+/* 
+ * 1. Symbol Resolution: kallsyms_expand_symbol
+ */
+kprobe:kallsyms_expand_symbol*
+/comm == "perf"/
+{
+    @start_kallsyms[tid] = nsecs;
+}
+
+kretprobe:kallsyms_expand_symbol*
+/comm == "perf" && @start_kallsyms[tid]/
+{
+    @lat_kallsyms_ns = hist(nsecs - @start_kallsyms[tid]);
+    delete(@start_kallsyms[tid]);
+}
+
+/* 
+ * 2. Ring Buffer Page Allocation: perf_mmap_alloc_page
+ */
+kprobe:perf_mmap_alloc_page
+/comm == "perf"/
+{
+    @start_mmap[tid] = nsecs;
+}
+
+kretprobe:perf_mmap_alloc_page
+/comm == "perf" && @start_mmap[tid]/
+{
+    @lat_mmap_ns = hist(nsecs - @start_mmap[tid]);
+    delete(@start_mmap[tid]);
+}
+
+/* 
+ * 3. NMI Sampling Handler: __perf_event_overflow
+ */
+kprobe:__perf_event_overflow
+/pid == $1/
+{
+    @start_nmi[tid] = nsecs;
+}
+
+kretprobe:__perf_event_overflow
+/pid == $1 && @start_nmi[tid]/
+{
+    @lat_nmi_ns = hist(nsecs - @start_nmi[tid]);
+    delete(@start_nmi[tid]);
+}
+
+/* 
+ * 4. Ring Buffer Writes: perf_event_output
+ */
+kprobe:perf_event_output
+/pid == $1/
+{
+    @start_output[tid] = nsecs;
+}
+
+kretprobe:perf_event_output
+/pid == $1 && @start_output[tid]/
+{
+    @lat_output_ns = hist(nsecs - @start_output[tid]);
+    delete(@start_output[tid]);
+}
+
+

@@ -17,11 +17,11 @@
 DURATION      = 15
 ITERATIONS    = 1000
 CONTAINER     = perf-go-api
-STACK_DIR     = ..
+STACK_DIR     = ../..
 EVENTS        = cycles,page-faults,branch-misses,context-switches,cache-misses
 RESULTS_DIR   = results
 TIMESTAMP     = $(shell date +%Y%m%d_%H%M%S)
-RESULTS_FILE  = $(RESULTS_DIR)/goapi_ebpf_overhead_$(TIMESTAMP).csv
+RESULTS_FILE  = ../results/goapi_ebpf_overhead_$(TIMESTAMP).csv
 
 all:
 	@echo "=================================================================="
@@ -30,7 +30,7 @@ all:
 	@echo "  Results will be saved to: $(RESULTS_FILE)"
 	@echo "=================================================================="
 	@echo ""
-	@mkdir -p $(RESULTS_DIR)
+	@mkdir -p ../results
 	@# ---- Step 1: Start Docker stack ----
 	@echo ">>> Step 1/6: Starting Docker microservice stack..."
 	cd $(STACK_DIR) && docker compose up -d --build
@@ -57,7 +57,7 @@ all:
 	echo ">>> Step 4/6: Running eBPF measurement ($(ITERATIONS) iterations × $(DURATION)s)..."; \
 	echo "    Estimated time: ~$$(( $(ITERATIONS) * $(DURATION) * 2 / 60 + 5 )) minutes"; \
 	echo ""; \
-	sudo python3 measure_statistically_ebpf.py \
+	sudo python3 ../common/measure_statistically_ebpf.py \
 		--iterations $(ITERATIONS) \
 		--duration $(DURATION) \
 		--pid $$API_PID \

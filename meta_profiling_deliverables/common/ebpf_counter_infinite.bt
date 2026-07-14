@@ -1,0 +1,39 @@
+#!/usr/bin/env bpftrace
+/*
+ * ebpf_counter_infinite.bt — Infinite eBPF counter
+ * 
+ * Runs until interrupted via SIGINT (Ctrl+C), then relies on
+ * bpftrace's default behavior to print the final map values.
+ * 
+ * Usage: sudo bpftrace ebpf_counter_infinite.bt <PID>
+ */
+
+hardware:cycles:100000
+/pid == $1/
+{
+    @cycles++;
+}
+
+hardware:cache-misses:1000
+/pid == $1/
+{
+    @cache_misses++;
+}
+
+hardware:branch-misses:1000
+/pid == $1/
+{
+    @branch_misses++;
+}
+
+software:page-faults:1
+/pid == $1/
+{
+    @page_faults++;
+}
+
+software:context-switches:1
+/pid == $1/
+{
+    @ctx_switches++;
+}

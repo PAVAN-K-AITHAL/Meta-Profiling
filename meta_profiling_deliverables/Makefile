@@ -1,42 +1,31 @@
-.PHONY: all compile test-single test-stat clean
+# =============================================================================
+# Root Makefile — Orchestrator for Meta-Profiling
+# =============================================================================
+# Runs both experiments sequentially by delegating to the sub-Makefiles.
+#
+# Usage:   make              (runs both tests)
+#          make run-dummy     (dummy workload only)
+#          make run-goapi     (Go API only)
+# =============================================================================
 
-all: compile test-single test-stat
+.PHONY: all run-dummy run-goapi clean
 
-# Compile the dummy workload
-compile:
-	@echo "Compiling dummy workload..."
-	gcc dummy_workload.c -o dummy_workload
+all:
+	@echo "╔══════════════════════════════════════════════════════════════════╗"
+	@echo "║     Sequential Meta-Profiling — eBPF + Go API                  ║"
+	@echo "╚══════════════════════════════════════════════════════════════════╝"
+	$(MAKE) -C dummy_workload_test
+	@echo "  ⏳ Dummy workload complete. Starting Go API test..."
+	@sleep 5
+	$(MAKE) -C go_api_test
+	@echo "  ✅ ALL EXPERIMENTS COMPLETE"
 
-# Run the single overhead test
-test-single: compile
-	@echo "========================================="
-	@echo "Running single overhead measurement test"
-	@echo "========================================="
-	@# Start the dummy workload in the background and save its PID
-	@taskset -c 4-5 ./dummy_workload > /dev/null & \
-	PID=$$!; \
-	echo "Started dummy workload with PID: $$PID (pinned to CPUs 4-5)"; \
-	sleep 1; \
-	sudo ./measure_overhead.sh $$PID; \
-	kill -9 $$PID; \
-	echo "Killed dummy workload."
+run-dummy:
+	$(MAKE) -C dummy_workload_test
 
-# Run the statistical overhead test
-test-stat: compile
-	@echo "========================================="
-	@echo "Running statistical measurement test"
-	@echo "========================================="
-	@# Start the dummy workload in the background and save its PID
-	@taskset -c 4-5 ./dummy_workload > /dev/null & \
-	PID=$$!; \
-	echo "Started dummy workload with PID: $$PID (pinned to CPUs 4-5)"; \
-	sleep 1; \
-	sudo python3 measure_statistically.py --iterations 1000 --duration 2 --pid $$PID; \
-	kill -9 $$PID; \
-	echo "Killed dummy workload."
+run-goapi:
+	$(MAKE) -C go_api_test
 
-# Clean compiled binaries and temp files
 clean:
-	@echo "Cleaning up..."
-	rm -f dummy_workload
-	sudo rm -f /tmp/base_metrics.csv /tmp/tool_metrics.csv /tmp/perf-experiment.data
+	$(MAKE) -C dummy_workload_test clean
+	$(MAKE) -C go_api_test clean

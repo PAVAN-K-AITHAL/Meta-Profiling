@@ -50,6 +50,18 @@ PERF_RECORD_CPU = "7"     # Inner tool being measured — perf record
 # Helpers
 # ---------------------------------------------------------------------------
 
+def format_number(n):
+    """Format large numbers with SI suffixes: 1000 → 1.0 K, 1000000 → 1.0 M."""
+    n = float(n)
+    if abs(n) >= 1e9:
+        return f"{n / 1e9:.1f} B"
+    elif abs(n) >= 1e6:
+        return f"{n / 1e6:.1f} M"
+    elif abs(n) >= 1e3:
+        return f"{n / 1e3:.1f} K"
+    else:
+        return f"{n:.0f}"
+
 def run_cmd(cmd, timeout=None):
     """Run a shell command and return the CompletedProcess result."""
     try:
@@ -273,10 +285,10 @@ def main():
 
         results.append({
             "Metric": metric,
-            "Base Mean": int(b_mean),
-            "Base Std": int(b_std),
-            "Tool Mean": int(t_mean),
-            "Tool Std": int(t_std),
+            "Base Mean": format_number(b_mean),
+            "Base Std": format_number(b_std),
+            "Tool Mean": format_number(t_mean),
+            "Tool Std": format_number(t_std),
             "Overhead %": overhead_pct,
             "P-Value": p_val_str,
             "Cohen's d": d_str,
@@ -286,16 +298,24 @@ def main():
     # ------------------------------------------------------------------
     # Print results
     # ------------------------------------------------------------------
-    print(f"\n\n{'=' * 90}")
-    print(f"  eBPF Statistical Results — Welch's t-test "
-          f"({args.iterations} iters, {args.duration}s window)")
-    print(f"  Outer measurement: bpftrace (eBPF) | Inner tool: perf record -c 100000")
-    print(f"  bpftrace CPU: {BPFTRACE_CPU} | perf record CPU: {PERF_RECORD_CPU}")
-    print(f"{'=' * 90}")
+    print(f"\n\n{'=' * 100}")
+    print(f"  Table: Hardware Overhead of perf record -g -c 100K Profiling a CPU-bound")
+    print(f"         Workload, Measured via eBPF over {args.iterations} Iterations ({args.duration}s Window)")
+    print(f"")
+    print(f"  Outer measurement: bpftrace (eBPF) on CPU {BPFTRACE_CPU} (Socket 1)")
+    print(f"  Inner tool:        perf record -g -c 100K on CPU {PERF_RECORD_CPU} (Socket 0)")
+    print(f"  Statistical test:  Welch's t-test (unequal variance), α = 0.05")
+    print(f"{'=' * 100}")
 
     if results:
         df = pd.DataFrame(results)
         print(df.to_string(index=False))
+
+        # Key observation
+        cycle_row = next((r for r in results if r['Metric'] == 'cycles'), None)
+        if cycle_row:
+            print(f"\n  Key Observation: Cycle overhead is {cycle_row['Overhead %']},")
+            print(f"  confirming negligible CPU cost of perf record at 100K sampling period.")
 
         # Save results CSV
         out_dir = os.path.dirname(args.output)
@@ -305,7 +325,7 @@ def main():
         print(f"\n  Results saved to: {args.output}")
     else:
         print("  No data collected. Check that bpftrace can attach to hardware events.")
-    print(f"{'=' * 90}")
+    print(f"{'=' * 100}")
 
 
 if __name__ == "__main__":

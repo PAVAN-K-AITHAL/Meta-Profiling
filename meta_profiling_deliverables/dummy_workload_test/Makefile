@@ -20,7 +20,7 @@ DURATION      = 2
 ITERATIONS    = 1000
 RESULTS_DIR   = results
 TIMESTAMP     = $(shell date +%Y%m%d_%H%M%S)
-RESULTS_FILE  = $(RESULTS_DIR)/ebpf_overhead_$(TIMESTAMP).csv
+RESULTS_FILE  = ../results/ebpf_overhead_$(TIMESTAMP).csv
 
 # CPU pinning — isolated CPUs on this system (Xeon E5-2620 v4)
 # CPU 6:  Core 6, Socket 0 (HT sibling: CPU 22, not isolated)
@@ -67,12 +67,12 @@ test-stat: compile
 	@echo "  workload=CPU$(WORKLOAD_CPU) | perf=CPU$(TOOL_CPU) | bpftrace=CPU$(MEASURE_CPU)"
 	@echo "  Results: $(RESULTS_FILE)"
 	@echo "=================================================================="
-	@mkdir -p $(RESULTS_DIR)
+	@mkdir -p ../results
 	@taskset -c $(WORKLOAD_CPU) ./dummy_workload > /dev/null & \
 	PID=$$!; \
 	echo "  Workload PID: $$PID (CPU $(WORKLOAD_CPU))"; \
 	sleep 1; \
-	sudo python3 measure_statistically_ebpf.py \
+	sudo python3 ../common/measure_statistically_ebpf.py \
 		--iterations $(ITERATIONS) \
 		--duration $(DURATION) \
 		--pid $$PID \
