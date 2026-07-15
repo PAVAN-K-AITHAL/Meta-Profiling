@@ -48,7 +48,7 @@ from datetime import datetime
 
 # Add common/ to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'common'))
-from measure_statistically_ebpf import run_bpftrace_cpu, METRICS, format_number
+from measure_statistically_ebpf import run_bpftrace, METRICS, format_number
 
 # ---------------------------------------------------------------------------
 # Configuration
