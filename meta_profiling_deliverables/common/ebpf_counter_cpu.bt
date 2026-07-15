@@ -22,6 +22,17 @@
  *   page-faults:                    1   (exact count)
  *   context-switches:               1   (exact count)
  *
+ * NOTE ON PERIOD DIFFERENCES (Issue 7):
+ *   This script uses HIGHER periods (100K/1K/1K) than ebpf_counter_pid_cpu.bt
+ *   (50K/100/100). This is intentional:
+ *   - This script measures HIGH-ACTIVITY workloads (billions of cycles/5s).
+ *     High periods reduce NMI overhead on the workload without losing accuracy.
+ *   - ebpf_counter_pid_cpu.bt measures LOW-ACTIVITY tools (perf record, ~5-50M
+ *     cycles/5s). Lower periods are needed for enough overflows to count.
+ *   - If comparing cross-workload in analyze_h4(), the analysis uses
+ *     extrapolated values (count × period), so different periods are valid
+ *     as long as each has enough overflow counts to reduce quantization error.
+ *
  * PMU counter budget (Broadwell, 4 GP + 3 fixed):
  *   cycles        → fixed counter #0 (free)
  *   cache-misses  → GP #1

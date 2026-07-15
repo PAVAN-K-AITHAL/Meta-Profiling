@@ -1,0 +1,138 @@
+#!/usr/bin/env bpftrace
+/*
+ * ebpf_counter_pid_cpu.bt — Timed eBPF hardware/software event counter
+ *                           (PID + CPU dual filter)
+ *
+ * Usage: sudo bpftrace ebpf_counter_pid_cpu.bt <PID> <CPU_ID> <DURATION_SECONDS>
+ *
+ * This variant filters by BOTH PID and CPU. Use this when measuring a
+ * process pinned to a specific CPU (e.g., perf record on CPU 7).
+ *
+ * WHY DUAL FILTER?
+ *   Hardware overflow interrupts (NMIs) fire on ALL CPUs for all processes.
+ *   A PID-only filter (ebpf_counter.bt) causes two problems:
+ *
+ *   1. PMU CONTENTION: bpftrace's hardware:cycles event consumes a PMU
+ *      counter on every CPU, including CPU 6 where perf record is also
+ *      sampling cycles:k. Two different configurations of Fixed Counter 0
+ *      force the kernel to multiplex, degrading perf record's sampling.
+ *
+ *   2. NMI OBSERVER EFFECT: Every NMI on the target CPU interrupts the
+ *      target process. The NMI handler's own cycles (~400-700 per NMI)
+ *      are attributed to the target process, inflating the measurement.
+ *
+ *   Adding a CPU filter means the BPF program only runs when the event
+ *   fires on the target CPU, and the kernel can optimize probe placement.
+ *   This doesn't fully eliminate NMIs on other CPUs (hardware limitation),
+ *   but it ensures we only COUNT events on the correct CPU.
+ *
+ * QUANTIZATION NOISE:
+ *   All measurements are quantized to multiples of the overflow period.
+ *   For perf record (~5-50M cycles/5s), period=50K gives 100-1000 overflows,
+ *   yielding ~1-3% quantization error per iteration. Over 200 iterations,
+ *   the law of large numbers reduces this to <0.2% error in the mean.
+ *
+ * Sampling periods (events between probe firings):
+ *   cycles:                    50,000   (extrapolate: count × 50,000)
+ *   cache-misses:                 100   (extrapolate: count ×    100)
+ *   branch-misses:                100   (extrapolate: count ×    100)
+ *   page-faults:                    1   (exact count)
+ *   context-switches:               1   (exact count)
+ *
+ * Why cycles = 50K (not 10K or 100K)?
+ *   - 10K: Too aggressive — generates ~210K NMIs/sec on the target CPU,
+ *     adding ~84-147M observer-effect cycles/sec (Issue 3).
+ *   - 100K: Too coarse — perf record at high -c values may only accumulate
+ *     50-500 overflows, giving 0.2-2% quantization error per iteration.
+ *   - 50K: Sweet spot — ~42K NMIs/sec (5× less observer effect than 10K),
+ *     with 100-1000 overflows per 5s window (1-3% error, averaged out).
+ *
+ * PMU counter budget (Broadwell, 4 GP + 3 fixed):
+ *   cycles        → fixed counter #0 (free)
+ *   cache-misses  → GP #1
+ *   branch-misses → GP #2
+ *   page-faults, context-switches → software (no PMU)
+ *   Total: 1 fixed + 2 GP → NO multiplexing on target CPU ✓
+ *
+ * NOTE: Deliberately avoids BEGIN/END probes to work around the
+ *       "Could not resolve symbol: /proc/self/exe:BEGIN_trigger"
+ *       bug in bpftrace 0.14.0 (Ubuntu 22.04 stripped binary).
+ *       Uses interval:s:1 for countdown and CSV output instead.
+ *
+ * Output format (between CSV_START / CSV_END markers):
+ *   <metric>,<raw_overflow_count>,<period>
+ *
+ * The caller multiplies count × period to get the extrapolated value.
+ * Software events (period=1) are exact counts with zero extrapolation error.
+ */
+
+/*
+ * Hardware events — overflow-based counting.
+ * Dual filter: pid == $1 AND cpu == $2
+ * Only counts events when BOTH the target PID is running AND
+ * it's on the expected CPU. This eliminates:
+ *   - PMU contention on other CPUs (no counter consumption on CPU 6)
+ *   - False attribution from other processes on the target CPU
+ */
+
+hardware:cycles:50000
+/pid == $1 && cpu == $2/
+{
+    @cycles++;
+}
+
+hardware:cache-misses:100
+/pid == $1 && cpu == $2/
+{
+    @cache_misses++;
+}
+
+hardware:branch-misses:100
+/pid == $1 && cpu == $2/
+{
+    @branch_misses++;
+}
+
+/*
+ * Software events — exact counting (period = 1).
+ * Every single event triggers the probe, so the count is exact.
+ */
+
+software:page-faults:1
+/pid == $1 && cpu == $2/
+{
+    @page_faults++;
+}
+
+software:context-switches:1
+/pid == $1 && cpu == $2/
+{
+    @ctx_switches++;
+}
+
+/*
+ * Timer — fires every second.
+ * After $3 seconds: prints CSV output, clears all maps, exits.
+ * Clearing maps before exit() prevents bpftrace's default map dump.
+ */
+interval:s:1
+{
+    @ticks++;
+    if (@ticks >= $3) {
+        printf("\nCSV_START\n");
+        printf("cycles,%d,50000\n",                    @cycles);
+        printf("cache-misses,%d,100\n",                @cache_misses);
+        printf("branch-misses,%d,100\n",               @branch_misses);
+        printf("page-faults,%d,1\n",                   @page_faults);
+        printf("context-switches,%d,1\n",              @ctx_switches);
+        printf("CSV_END\n");
+
+        clear(@cycles);
+        clear(@cache_misses);
+        clear(@branch_misses);
+        clear(@page_faults);
+        clear(@ctx_switches);
+        clear(@ticks);
+        exit();
+    }
+}

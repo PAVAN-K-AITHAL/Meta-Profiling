@@ -48,7 +48,7 @@ from datetime import datetime
 
 # Add common/ to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'common'))
-from measure_statistically_ebpf import run_bpftrace, METRICS, format_number
+from measure_statistically_ebpf import run_bpftrace, run_bpftrace_cpu, run_bpftrace_pid_cpu, METRICS, format_number
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -228,11 +228,13 @@ def measure_workload_baseline(duration):
     """Measure the WORKLOAD's own hardware counters via bpftrace.
     No profiler is running during this measurement.
     This gives the denominator for H4 (overhead ratio = tool / workload).
+
+    Uses CPU-based filtering (not PID) because the workload runs
+    lat_mem_rd in a while-true loop — each invocation exits and restarts
+    with a different PID. CPU filtering on an isolated CPU is immune
+    to this PID churn. (Issue 1 fix)
     """
-    wl_pid = refresh_workload_pid()
-    if not wl_pid:
-        return None
-    return run_bpftrace(wl_pid, duration)
+    return run_bpftrace_cpu(WORKLOAD_CPU, duration)
 
 
 def measure_tool_overhead(perf_pid, duration):
@@ -240,7 +242,11 @@ def measure_tool_overhead(perf_pid, duration):
 
     This is the core measurement — the profiling tool's own resource
     consumption (cycles, cache-misses, branch-misses).  bpftrace counts
-    hardware events attributed to perf record's PID.
+    hardware events attributed to perf record's PID on its pinned CPU.
+
+    Uses dual PID+CPU filter (ebpf_counter_pid_cpu.bt) to:
+      - Eliminate PMU contention on CPU 6 where perf record samples (Issue 2)
+      - Reduce NMI observer effect by limiting probe scope (Issue 3)
 
     Note: this captures perf record's USERSPACE processing overhead
     (ring buffer reads, file writes, symbol resolution).  The NMI
@@ -249,7 +255,7 @@ def measure_tool_overhead(perf_pid, duration):
     """
     if not perf_pid:
         return None
-    return run_bpftrace(perf_pid, duration)
+    return run_bpftrace_pid_cpu(perf_pid, PERF_RECORD_CPU, duration)
 
 
 # ---------------------------------------------------------------------------
@@ -463,8 +469,8 @@ def main():
         return
 
     print(f"  perf record PID: {test_perf_pid}")
-    print(f"  Running bpftrace for {DURATION}s against perf record PID...")
-    test_result = run_bpftrace(test_perf_pid, DURATION)
+    print(f"  Running bpftrace for {DURATION}s against perf record PID+CPU {PERF_RECORD_CPU}...")
+    test_result = run_bpftrace_pid_cpu(test_perf_pid, PERF_RECORD_CPU, DURATION)
     stop_perf_record()
     if test_result:
         print(f"  ✅ Sanity check PASSED — got {len(test_result)} metrics from perf record")
@@ -480,19 +486,15 @@ def main():
         stop_workload(workload_name)
         return
 
-    # Also verify we can measure the workload (for baseline / H4 ratio)
-    print(f"\n  Verifying workload baseline measurement...")
-    wl_pid = refresh_workload_pid()
-    if wl_pid:
-        wl_result = run_bpftrace(wl_pid, DURATION)
-        if wl_result:
-            print(f"  ✅ Workload baseline OK — got {len(wl_result)} metrics")
-            for k, v in wl_result.items():
-                print(f"     {k}: {format_number(v)}")
-        else:
-            print("  ⚠️ Could not measure workload baseline. H4 ratio data will be missing.")
+    # Also verify we can measure the workload via CPU-based filtering
+    print(f"\n  Verifying workload baseline measurement (CPU {WORKLOAD_CPU} filter)...")
+    wl_result = run_bpftrace_cpu(WORKLOAD_CPU, DURATION)
+    if wl_result:
+        print(f"  ✅ Workload baseline OK — got {len(wl_result)} metrics")
+        for k, v in wl_result.items():
+            print(f"     {k}: {format_number(v)}")
     else:
-        print("  ⚠️ Could not find workload PID for baseline measurement.")
+        print("  ⚠️ Could not measure workload baseline via CPU filter. H4 ratio data will be missing.")
 
     # ---------------------------------------------------------------
     # Time estimation

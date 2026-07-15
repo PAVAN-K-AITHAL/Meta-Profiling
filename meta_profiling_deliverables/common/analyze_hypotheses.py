@@ -23,7 +23,6 @@ import argparse
 import math
 import warnings
 import os
-from collections import defaultdict
 
 import pandas as pd
 import numpy as np
@@ -466,6 +465,9 @@ def analyze_h4(dummy_df, goapi_df=None):
     Computes overhead ratio: tool_overhead / workload_baseline × 100%.
     Test: TOST equivalence at Δ = 1%, 0.5%, and 2% thresholds.
     Works with both dummy workload and Go API data.
+    
+    Issue 5 fix: Now processes BOTH dummy and Go API data when provided.
+    Issue 6 fix: Merges on 'iteration' column instead of array index.
     """
     results = []
     report_lines = []
@@ -476,92 +478,119 @@ def analyze_h4(dummy_df, goapi_df=None):
     report_lines.append("> **H₁:** Profiler overhead < 1% (negligible).")
     report_lines.append("")
 
-    # Collect tool_overhead and workload_baseline from all H1 data
-    # (H4 is computed from the same data as H1 — it's a different question on the same measurements)
-    source_df = dummy_df
-    source_name = "dummy workload"
-
-    h1_data = source_df[source_df['hypothesis'] == 'H1']
-    if h1_data.empty:
-        report_lines.append("⚠️ No H1 data found to compute H4 ratio.\n")
-        return results, report_lines
-
-    tool_overhead = h1_data[h1_data['run_type'] == 'tool_overhead']
-    workload_baseline = h1_data[h1_data['run_type'] == 'workload_baseline']
-
-    if tool_overhead.empty or workload_baseline.empty:
-        report_lines.append("⚠️ Need both tool_overhead and workload_baseline rows for H4.\n")
-        return results, report_lines
-
     metrics = ['cycles', 'cache_misses', 'branch_misses', 'context_switches']
 
-    report_lines.append(f"### Overhead Ratio: perf record / {source_name}")
-    report_lines.append("")
-    report_lines.append("| Metric | Workload Mean | Tool Mean | Ratio % | TOST p (Δ=1%) | TOST p (Δ=0.5%) | TOST p (Δ=2%) | < 1%? |")
-    report_lines.append("|--------|-------------|-----------|---------|---------------|-----------------|---------------|-------|")
+    # Build list of (source_name, tool_df, workload_df) tuples to analyze
+    sources = []
 
-    for metric in metrics:
-        wl_vals = workload_baseline[metric].dropna().values.astype(float)
-        tool_vals = tool_overhead[metric].dropna().values.astype(float)
+    # Dummy workload: H4 is computed from H1 data (tool_overhead vs workload_baseline)
+    h1_data = dummy_df[dummy_df['hypothesis'] == 'H1']
+    if not h1_data.empty:
+        tool_oh = h1_data[h1_data['run_type'] == 'tool_overhead']
+        wl_bl = h1_data[h1_data['run_type'] == 'workload_baseline']
+        if not tool_oh.empty and not wl_bl.empty:
+            sources.append(("dummy workload", tool_oh, wl_bl))
 
-        if len(wl_vals) < 2 or len(tool_vals) < 2:
-            continue
+    # Go API workload: has its own H4 data (baseline vs profiled)
+    if goapi_df is not None:
+        h4_goapi = goapi_df[goapi_df['hypothesis'] == 'H4']
+        if not h4_goapi.empty:
+            goapi_profiled = h4_goapi[h4_goapi['run_type'] == 'profiled']
+            goapi_baseline = h4_goapi[h4_goapi['run_type'] == 'baseline']
+            if not goapi_profiled.empty and not goapi_baseline.empty:
+                sources.append(("Go API workload", goapi_profiled, goapi_baseline))
+        # Fallback: try H1 data from Go API (same as dummy approach)
+        if not any(name == "Go API workload" for name, _, _ in sources):
+            h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
+            if not h1_goapi.empty:
+                goapi_tool = h1_goapi[h1_goapi['run_type'] == 'tool_overhead']
+                goapi_wl = h1_goapi[h1_goapi['run_type'] == 'workload_baseline']
+                if not goapi_tool.empty and not goapi_wl.empty:
+                    sources.append(("Go API workload (H1)", goapi_tool, goapi_wl))
 
-        wl_mean = np.mean(wl_vals)
-        tool_mean = np.mean(tool_vals)
-        ratio_pct = (tool_mean / wl_mean * 100) if wl_mean > 0 else 0
+    if not sources:
+        report_lines.append("⚠️ No paired tool/workload data found for H4.\n")
+        return results, report_lines
 
-        # TOST at multiple thresholds
-        # We test whether tool_overhead is within Δ% of zero
-        # (i.e., tool_overhead is negligibly small compared to workload)
-        # Using the ratio: tool / workload
-        ratios = []
-        min_len = min(len(tool_vals), len(wl_vals))
-        for j in range(min_len):
-            if wl_vals[j] > 0:
-                ratios.append(tool_vals[j] / wl_vals[j] * 100)  # as percentage
-
-        ratios = np.array(ratios)
-        if len(ratios) < 2:
-            continue
-
-        # One-sample t-test style TOST: is the mean ratio < delta?
-        mean_ratio = np.mean(ratios)
-        se_ratio = np.std(ratios, ddof=1) / np.sqrt(len(ratios))
-        df = len(ratios) - 1
-
-        tost_results = {}
-        for delta_pct in [0.5, 1.0, 2.0]:
-            # Test: mean_ratio < delta_pct (one-sided)
-            t_stat = (mean_ratio - delta_pct) / se_ratio if se_ratio > 0 else -999
-            p_val = stats.t.cdf(t_stat, df)  # want t to be very negative
-            tost_results[delta_pct] = p_val
-
-        negligible = "✅ YES" if tost_results[1.0] < 0.05 else "❌ NO"
-
-        report_lines.append(
-            f"| {metric} | {fmt(wl_mean)} | {fmt(tool_mean)} | "
-            f"{ratio_pct:.4f}% | {tost_results[1.0]:.4e} | "
-            f"{tost_results[0.5]:.4e} | {tost_results[2.0]:.4e} | {negligible} |"
-        )
-
-        results.append({"test": "H4", "metric": metric, "p_value": tost_results[1.0], "test_type": "TOST_1pct"})
-
-    # Summary
-    tool_cycles = tool_overhead['cycles'].dropna().values.astype(float)
-    wl_cycles = workload_baseline['cycles'].dropna().values.astype(float)
-    if len(tool_cycles) > 0 and len(wl_cycles) > 0:
-        mean_tool = np.mean(tool_cycles)
-        mean_wl = np.mean(wl_cycles)
+    for source_name, tool_overhead, workload_baseline in sources:
+        report_lines.append(f"### Overhead Ratio: perf record / {source_name}")
         report_lines.append("")
-        report_lines.append(
-            f"> **Summary:** `perf record -g -c 100K` consumed {fmt(mean_tool)} cycles "
-            f"per {5}-second window, which is {mean_tool/mean_wl*100:.4f}% of the "
-            f"workload's own {fmt(mean_wl)} cycles."
-            f"of total overhead (direct + cache pollution)."
-        )
+        report_lines.append("| Metric | Workload Mean | Tool Mean | Ratio % | TOST p (Δ=1%) | TOST p (Δ=0.5%) | TOST p (Δ=2%) | < 1%? |")
+        report_lines.append("|--------|-------------|-----------|---------|---------------|-----------------|---------------|-------|")
 
-    report_lines.append("")
+        for metric in metrics:
+            # Issue 6 fix: merge on 'iteration' column for correct pairing
+            # instead of pairing by array index which breaks if rows are missing
+            if 'iteration' in tool_overhead.columns and 'iteration' in workload_baseline.columns:
+                merged = pd.merge(
+                    tool_overhead[['iteration', metric]].dropna(),
+                    workload_baseline[['iteration', metric]].dropna(),
+                    on='iteration',
+                    suffixes=('_tool', '_wl')
+                )
+                if len(merged) < 2:
+                    continue
+                tool_vals = merged[f'{metric}_tool'].values.astype(float)
+                wl_vals = merged[f'{metric}_wl'].values.astype(float)
+            else:
+                # Fallback: use array index (legacy data without iteration column)
+                wl_vals = workload_baseline[metric].dropna().values.astype(float)
+                tool_vals = tool_overhead[metric].dropna().values.astype(float)
+                if len(wl_vals) < 2 or len(tool_vals) < 2:
+                    continue
+
+            wl_mean = np.mean(wl_vals)
+            tool_mean = np.mean(tool_vals)
+            ratio_pct = (tool_mean / wl_mean * 100) if wl_mean > 0 else 0
+
+            # Compute per-iteration ratios for TOST
+            ratios = []
+            for j in range(len(tool_vals)):
+                if wl_vals[j] > 0:
+                    ratios.append(tool_vals[j] / wl_vals[j] * 100)  # as percentage
+
+            ratios = np.array(ratios)
+            if len(ratios) < 2:
+                continue
+
+            # One-sample t-test style TOST: is the mean ratio < delta?
+            mean_ratio = np.mean(ratios)
+            se_ratio = np.std(ratios, ddof=1) / np.sqrt(len(ratios))
+            df = len(ratios) - 1
+
+            tost_results = {}
+            for delta_pct in [0.5, 1.0, 2.0]:
+                # Test: mean_ratio < delta_pct (one-sided)
+                t_stat = (mean_ratio - delta_pct) / se_ratio if se_ratio > 0 else -999
+                p_val = stats.t.cdf(t_stat, df)  # want t to be very negative
+                tost_results[delta_pct] = p_val
+
+            negligible = "✅ YES" if tost_results[1.0] < 0.05 else "❌ NO"
+
+            report_lines.append(
+                f"| {metric} | {fmt(wl_mean)} | {fmt(tool_mean)} | "
+                f"{ratio_pct:.4f}% | {tost_results[1.0]:.4e} | "
+                f"{tost_results[0.5]:.4e} | {tost_results[2.0]:.4e} | {negligible} |"
+            )
+
+            results.append({"test": "H4", "metric": metric, "p_value": tost_results[1.0],
+                            "test_type": f"TOST_1pct_{source_name.split()[0]}"})
+
+        # Summary for this source
+        tool_cycles = tool_overhead['cycles'].dropna().values.astype(float)
+        wl_cycles = workload_baseline['cycles'].dropna().values.astype(float)
+        if len(tool_cycles) > 0 and len(wl_cycles) > 0:
+            mean_tool = np.mean(tool_cycles)
+            mean_wl = np.mean(wl_cycles)
+            report_lines.append("")
+            report_lines.append(
+                f"> **Summary ({source_name}):** `perf record -g -c 100K` consumed {fmt(mean_tool)} cycles "
+                f"per measurement window, which is {mean_tool/mean_wl*100:.4f}% of the "
+                f"workload's own {fmt(mean_wl)} cycles."
+            )
+
+        report_lines.append("")
+
     return results, report_lines
 
 
@@ -620,6 +649,7 @@ def format_correction_table(corrected):
 REQUESTS_DEFAULT = 1000
 
 def main():
+    global REQUESTS_DEFAULT
     parser = argparse.ArgumentParser(
         description="Statistical Analysis for All 4 Hypotheses"
     )
@@ -632,7 +662,6 @@ def main():
                         help=f"Requests per iteration for per-request calc (default: {REQUESTS_DEFAULT})")
     args = parser.parse_args()
 
-    global REQUESTS_DEFAULT
     REQUESTS_DEFAULT = args.requests
 
     # Load data

@@ -145,13 +145,42 @@ def measure_constant_work(target_pid):
     """Run bpftrace infinite counter, send N requests, stop, parse results.
     
     Returns dict of hardware event counts covering exactly REQUESTS_PER_ITER requests.
+    
+    Issue 9 fix: Waits for bpftrace 'Attaching' message instead of fixed sleep.
     """
     # Start bpftrace (infinite mode — runs until SIGINT)
     bpf_proc = subprocess.Popen(
         ["sudo", "bpftrace", EBPF_INFINITE, str(target_pid)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
-    time.sleep(5)  # Let bpftrace compile and attach
+
+    # Wait for bpftrace to compile and attach probes.
+    # bpftrace prints "Attaching N probes..." to stderr when ready.
+    # This replaces the old time.sleep(5) which could either:
+    #   - Count 3s of idle events if compilation finishes in 2s
+    #   - Miss the first 2s of requests if compilation takes 7s
+    import select
+    attached = False
+    attach_timeout = 30  # max seconds to wait for compilation
+    start_time = time.time()
+    while time.time() - start_time < attach_timeout:
+        # Use select to check if stderr has data (non-blocking on Linux)
+        try:
+            ready, _, _ = select.select([bpf_proc.stderr], [], [], 0.5)
+        except (ValueError, OSError):
+            break
+        if ready:
+            line = bpf_proc.stderr.readline()
+            if "Attaching" in line:
+                attached = True
+                break
+        if bpf_proc.poll() is not None:
+            # bpftrace exited prematurely
+            break
+
+    if not attached:
+        print("  ⚠️ bpftrace did not print 'Attaching' within timeout. Using fallback sleep.")
+        time.sleep(5)
 
     # Send exactly N requests
     send_requests(REQUESTS_PER_ITER)
@@ -303,6 +332,7 @@ def run_h4(api_pid, writer, iterations):
 # ---------------------------------------------------------------------------
 
 def main():
+    global REQUESTS_PER_ITER
     parser = argparse.ArgumentParser(
         description="Hypothesis Testing — Go API (H1 + H4, Constant Work)"
     )
@@ -320,7 +350,6 @@ def main():
     if args.pilot:
         args.iterations = 50
 
-    global REQUESTS_PER_ITER
     REQUESTS_PER_ITER = args.requests
 
     api_pid = get_api_pid()

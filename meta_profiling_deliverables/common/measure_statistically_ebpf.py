@@ -39,12 +39,14 @@ from scipy import stats
 # Path to the eBPF counter scripts (same directory as this script)
 EBPF_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ebpf_counter.bt")
 EBPF_SCRIPT_CPU = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ebpf_counter_cpu.bt")
+EBPF_SCRIPT_PID_CPU = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ebpf_counter_pid_cpu.bt")
 
 # Metrics tracked (must match ebpf_counter.bt output)
 METRICS = ["cycles", "cache-misses", "branch-misses", "page-faults", "context-switches"]
 
 # CPU pinning for isolated cores on this system
-BPFTRACE_CPU = "14"       # Outer measurement — bpftrace
+# NOTE: bpftrace userspace is NOT pinned (taskset triggers bpftrace 0.14 bugs).
+# BPF probes run in kernel space on the target's CPU regardless.
 PERF_RECORD_CPU = "7"     # Inner tool being measured — perf record
 
 # ---------------------------------------------------------------------------
@@ -132,9 +134,32 @@ def run_bpftrace(pid, duration):
 def run_bpftrace_cpu(cpu_id, duration):
     """Run the eBPF counter script against a specific CPU for a given duration.
 
+    Use for WORKLOAD baseline measurements where the workload is pinned
+    to an isolated CPU but its PID may change (e.g., lat_mem_rd in a
+    while-true loop). CPU filtering is immune to PID churn.
+
     Returns parsed results dict or empty dict on failure.
     """
     cmd = f"sudo bpftrace {EBPF_SCRIPT_CPU} {cpu_id} {duration}"
+    timeout = duration + 45
+    res = run_cmd(cmd, timeout=timeout)
+    if res.returncode != 0:
+        return {}
+    return parse_bpftrace_output(res.stdout)
+
+
+def run_bpftrace_pid_cpu(pid, cpu_id, duration):
+    """Run the dual-filter eBPF counter script (PID + CPU) for a given duration.
+
+    Use for TOOL OVERHEAD measurements where the tool (e.g., perf record)
+    is pinned to a specific CPU. The dual filter:
+      - Eliminates PMU contention on other CPUs (Issue 2)
+      - Reduces NMI observer effect (Issue 3)
+      - Uses cycles period=50K (balanced quantization vs observer effect)
+
+    Returns parsed results dict or empty dict on failure.
+    """
+    cmd = f"sudo bpftrace {EBPF_SCRIPT_PID_CPU} {pid} {cpu_id} {duration}"
     timeout = duration + 45
     res = run_cmd(cmd, timeout=timeout)
     if res.returncode != 0:
@@ -189,7 +214,7 @@ def main():
     print(f"=== eBPF Statistical Overhead Measurement ===")
     print(f"  Target PID:       {pid}")
     print(f"  eBPF script:      {EBPF_SCRIPT}")
-    print(f"  bpftrace CPU:     {BPFTRACE_CPU} (outer measurement)")
+    print(f"  bpftrace:         unpinned (BPF probes run in kernel on target CPU)")
     print(f"  perf record CPU:  {PERF_RECORD_CPU} (inner tool)")
     print(f"  Iterations:       {args.iterations}")
     print(f"  Window:           {args.duration}s")
@@ -316,8 +341,8 @@ def main():
     print(f"  Table: Hardware Overhead of perf record -g -c 100K Profiling a CPU-bound")
     print(f"         Workload, Measured via eBPF over {args.iterations} Iterations ({args.duration}s Window)")
     print(f"")
-    print(f"  Outer measurement: bpftrace (eBPF) on CPU {BPFTRACE_CPU} (Socket 1)")
-    print(f"  Inner tool:        perf record -g -c 100K on CPU {PERF_RECORD_CPU} (Socket 0)")
+    print(f"  Outer measurement: bpftrace (eBPF), unpinned (probes in kernel space)")
+    print(f"  Inner tool:        perf record -g -c 100K on CPU {PERF_RECORD_CPU}")
     print(f"  Statistical test:  Welch's t-test (unequal variance), α = 0.05")
     print(f"{'=' * 100}")
 
