@@ -2,8 +2,12 @@
 """
 measure_statistically_ebpf.py — eBPF-Based Statistical Measurement of Profiling Overhead
 
+NOTE: DIAGNOSTIC ONLY. The primary outer ruler is now perf stat
+(see perf_stat_ruler.py) — exact PMU counts, no quantization, no NMIs.
+bpftrace is kept for per-function latency attribution.
+
 Replaces perf stat (the outer measurement layer) with bpftrace/eBPF.
-Uses the same statistical analysis as measure_statistically.py:
+Statistical analysis:
   - Welch's t-test (unequal variance)
   - Cohen's d effect size
   - Overhead percentage computation
@@ -15,7 +19,8 @@ Architecture per iteration:
 CPU pinning (Intel Xeon E5-2620 v4, isolated CPUs: 6,7,14,15):
   dummy_workload:  CPU 6  (Core 6, Socket 0)
   perf record:     CPU 7  (Core 7, Socket 0)
-  bpftrace:        CPU 14 (Core 6, Socket 1)
+  bpftrace:        unpinned (taskset triggers bpftrace 0.14 bugs; probes
+                   fire in kernel on the target CPU regardless)
 
 Each layer runs on a separate isolated physical core to eliminate
 cross-talk and scheduler noise.

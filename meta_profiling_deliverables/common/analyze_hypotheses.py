@@ -4,7 +4,7 @@ analyze_hypotheses.py — Statistical Analysis for All 4 Hypotheses
 
 Reads the unified CSV output from run_hypotheses_dummy.py and
 run_hypotheses_goapi.py, then performs the formal statistical tests
-defined in hypothesis_framework.md.
+defined in docs/hypothesis_framework.md.
 
 H1: Constant Absolute Cost → Welch's ANOVA + TOST equivalence
 H2: Linear Scaling          → OLS regression + quadratic F-test
@@ -459,13 +459,87 @@ def analyze_h3(dummy_df):
 # H4 Analysis: Production Negligibility
 # ---------------------------------------------------------------------------
 
+def collect_h4_sources(dummy_df, goapi_df=None):
+    """Build the list of (source_name, measured_df, baseline_df, kind) for H4.
+
+    kind = "ratio": measured rows are the PROFILER's own counters
+                    (tool_overhead); overhead % = tool / workload × 100.
+    kind = "delta": measured rows are the APPLICATION's counters with the
+                    profiler attached (profiled); overhead % =
+                    (profiled − baseline) / baseline × 100.  A plain ratio
+                    here would be ~100% and could never pass a 1% bound.
+
+    Shared with generate_figures.py so the report and Figure 3 agree.
+    """
+    sources = []
+
+    # Dummy workload: H4 is computed from H1 data (tool_overhead vs workload_baseline)
+    h1_data = dummy_df[dummy_df['hypothesis'] == 'H1']
+    if not h1_data.empty:
+        tool_oh = h1_data[h1_data['run_type'] == 'tool_overhead']
+        wl_bl = h1_data[h1_data['run_type'] == 'workload_baseline']
+        if not tool_oh.empty and not wl_bl.empty:
+            sources.append(("dummy workload", tool_oh, wl_bl, "ratio"))
+
+    # Go API workload: has its own H4 data (baseline vs profiled)
+    if goapi_df is not None:
+        h4_goapi = goapi_df[goapi_df['hypothesis'] == 'H4']
+        if not h4_goapi.empty:
+            goapi_profiled = h4_goapi[h4_goapi['run_type'] == 'profiled']
+            goapi_baseline = h4_goapi[h4_goapi['run_type'] == 'baseline']
+            if not goapi_profiled.empty and not goapi_baseline.empty:
+                sources.append(("Go API workload", goapi_profiled, goapi_baseline, "delta"))
+        # Fallback: try H1 data from Go API (same as dummy approach)
+        if not any(src[0] == "Go API workload" for src in sources):
+            h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
+            if not h1_goapi.empty:
+                goapi_tool = h1_goapi[h1_goapi['run_type'] == 'tool_overhead']
+                goapi_wl = h1_goapi[h1_goapi['run_type'] == 'workload_baseline']
+                if not goapi_tool.empty and not goapi_wl.empty:
+                    sources.append(("Go API workload (H1)", goapi_tool, goapi_wl, "ratio"))
+
+    return sources
+
+
+def overhead_percentages(measured, baseline, metric, kind):
+    """Per-iteration overhead % for one metric.
+
+    Issue 6 fix: pairs rows on the 'iteration' column, not array index.
+    Returns (measured_vals, baseline_vals, overhead_pct) as float arrays.
+    """
+    if 'iteration' in measured.columns and 'iteration' in baseline.columns:
+        merged = pd.merge(
+            measured[['iteration', metric]].dropna(),
+            baseline[['iteration', metric]].dropna(),
+            on='iteration',
+            suffixes=('_tool', '_wl')
+        )
+        m_vals = merged[f'{metric}_tool'].values.astype(float)
+        b_vals = merged[f'{metric}_wl'].values.astype(float)
+    else:
+        # Fallback: use array index (legacy data without iteration column)
+        m_vals = measured[metric].dropna().values.astype(float)
+        b_vals = baseline[metric].dropna().values.astype(float)
+        n_min = min(len(m_vals), len(b_vals))
+        m_vals, b_vals = m_vals[:n_min], b_vals[:n_min]
+
+    valid = b_vals > 0
+    if kind == "delta":
+        pct = (m_vals[valid] - b_vals[valid]) / b_vals[valid] * 100
+    else:
+        pct = m_vals[valid] / b_vals[valid] * 100
+    return m_vals, b_vals, pct
+
+
 def analyze_h4(dummy_df, goapi_df=None):
     """H4: Is total overhead < 1% of workload resource consumption?
-    
-    Computes overhead ratio: tool_overhead / workload_baseline × 100%.
+
+    Overhead % per iteration (see collect_h4_sources for the two kinds):
+      ratio: tool_overhead / workload_baseline × 100%
+      delta: (profiled − baseline) / baseline × 100%
     Test: TOST equivalence at Δ = 1%, 0.5%, and 2% thresholds.
     Works with both dummy workload and Go API data.
-    
+
     Issue 5 fix: Now processes BOTH dummy and Go API data when provided.
     Issue 6 fix: Merges on 'iteration' column instead of array index.
     """
@@ -480,89 +554,49 @@ def analyze_h4(dummy_df, goapi_df=None):
 
     metrics = ['cycles', 'cache_misses', 'branch_misses', 'context_switches']
 
-    # Build list of (source_name, tool_df, workload_df) tuples to analyze
-    sources = []
-
-    # Dummy workload: H4 is computed from H1 data (tool_overhead vs workload_baseline)
-    h1_data = dummy_df[dummy_df['hypothesis'] == 'H1']
-    if not h1_data.empty:
-        tool_oh = h1_data[h1_data['run_type'] == 'tool_overhead']
-        wl_bl = h1_data[h1_data['run_type'] == 'workload_baseline']
-        if not tool_oh.empty and not wl_bl.empty:
-            sources.append(("dummy workload", tool_oh, wl_bl))
-
-    # Go API workload: has its own H4 data (baseline vs profiled)
-    if goapi_df is not None:
-        h4_goapi = goapi_df[goapi_df['hypothesis'] == 'H4']
-        if not h4_goapi.empty:
-            goapi_profiled = h4_goapi[h4_goapi['run_type'] == 'profiled']
-            goapi_baseline = h4_goapi[h4_goapi['run_type'] == 'baseline']
-            if not goapi_profiled.empty and not goapi_baseline.empty:
-                sources.append(("Go API workload", goapi_profiled, goapi_baseline))
-        # Fallback: try H1 data from Go API (same as dummy approach)
-        if not any(name == "Go API workload" for name, _, _ in sources):
-            h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
-            if not h1_goapi.empty:
-                goapi_tool = h1_goapi[h1_goapi['run_type'] == 'tool_overhead']
-                goapi_wl = h1_goapi[h1_goapi['run_type'] == 'workload_baseline']
-                if not goapi_tool.empty and not goapi_wl.empty:
-                    sources.append(("Go API workload (H1)", goapi_tool, goapi_wl))
+    sources = collect_h4_sources(dummy_df, goapi_df)
 
     if not sources:
         report_lines.append("⚠️ No paired tool/workload data found for H4.\n")
         return results, report_lines
 
-    for source_name, tool_overhead, workload_baseline in sources:
-        report_lines.append(f"### Overhead Ratio: perf record / {source_name}")
-        report_lines.append("")
-        report_lines.append("| Metric | Workload Mean | Tool Mean | Ratio % | TOST p (Δ=1%) | TOST p (Δ=0.5%) | TOST p (Δ=2%) | < 1%? |")
+    for source_name, tool_overhead, workload_baseline, kind in sources:
+        if kind == "delta":
+            report_lines.append(f"### Overhead: (profiled − baseline) / baseline, {source_name}")
+            report_lines.append("")
+            report_lines.append("| Metric | Baseline Mean | Profiled Mean | Overhead % | TOST p (Δ=1%) | TOST p (Δ=0.5%) | TOST p (Δ=2%) | < 1%? |")
+        else:
+            report_lines.append(f"### Overhead Ratio: perf record / {source_name}")
+            report_lines.append("")
+            report_lines.append("| Metric | Workload Mean | Tool Mean | Ratio % | TOST p (Δ=1%) | TOST p (Δ=0.5%) | TOST p (Δ=2%) | < 1%? |")
         report_lines.append("|--------|-------------|-----------|---------|---------------|-----------------|---------------|-------|")
 
         for metric in metrics:
-            # Issue 6 fix: merge on 'iteration' column for correct pairing
-            # instead of pairing by array index which breaks if rows are missing
-            if 'iteration' in tool_overhead.columns and 'iteration' in workload_baseline.columns:
-                merged = pd.merge(
-                    tool_overhead[['iteration', metric]].dropna(),
-                    workload_baseline[['iteration', metric]].dropna(),
-                    on='iteration',
-                    suffixes=('_tool', '_wl')
-                )
-                if len(merged) < 2:
-                    continue
-                tool_vals = merged[f'{metric}_tool'].values.astype(float)
-                wl_vals = merged[f'{metric}_wl'].values.astype(float)
-            else:
-                # Fallback: use array index (legacy data without iteration column)
-                wl_vals = workload_baseline[metric].dropna().values.astype(float)
-                tool_vals = tool_overhead[metric].dropna().values.astype(float)
-                if len(wl_vals) < 2 or len(tool_vals) < 2:
-                    continue
-
-            wl_mean = np.mean(wl_vals)
-            tool_mean = np.mean(tool_vals)
-            ratio_pct = (tool_mean / wl_mean * 100) if wl_mean > 0 else 0
-
-            # Compute per-iteration ratios for TOST
-            ratios = []
-            for j in range(len(tool_vals)):
-                if wl_vals[j] > 0:
-                    ratios.append(tool_vals[j] / wl_vals[j] * 100)  # as percentage
-
-            ratios = np.array(ratios)
+            tool_vals, wl_vals, ratios = overhead_percentages(
+                tool_overhead, workload_baseline, metric, kind)
             if len(ratios) < 2:
                 continue
 
-            # One-sample t-test style TOST: is the mean ratio < delta?
+            wl_mean = np.mean(wl_vals)
+            tool_mean = np.mean(tool_vals)
+            if wl_mean > 0:
+                ratio_pct = ((tool_mean - wl_mean) if kind == "delta" else tool_mean) / wl_mean * 100
+            else:
+                ratio_pct = 0
+
             mean_ratio = np.mean(ratios)
             se_ratio = np.std(ratios, ddof=1) / np.sqrt(len(ratios))
             df = len(ratios) - 1
 
             tost_results = {}
             for delta_pct in [0.5, 1.0, 2.0]:
-                # Test: mean_ratio < delta_pct (one-sided)
-                t_stat = (mean_ratio - delta_pct) / se_ratio if se_ratio > 0 else -999
-                p_val = stats.t.cdf(t_stat, df)  # want t to be very negative
+                # Upper bound: mean < +Δ (want t very negative)
+                t_upper = (mean_ratio - delta_pct) / se_ratio if se_ratio > 0 else -999
+                p_val = stats.t.cdf(t_upper, df)
+                if kind == "delta":
+                    # A delta can be negative, so also test mean > −Δ
+                    t_lower = (mean_ratio + delta_pct) / se_ratio if se_ratio > 0 else 999
+                    p_val = max(p_val, 1 - stats.t.cdf(t_lower, df))
                 tost_results[delta_pct] = p_val
 
             negligible = "✅ YES" if tost_results[1.0] < 0.05 else "❌ NO"
@@ -583,11 +617,32 @@ def analyze_h4(dummy_df, goapi_df=None):
             mean_tool = np.mean(tool_cycles)
             mean_wl = np.mean(wl_cycles)
             report_lines.append("")
-            report_lines.append(
-                f"> **Summary ({source_name}):** `perf record -g -c 100K` consumed {fmt(mean_tool)} cycles "
-                f"per measurement window, which is {mean_tool/mean_wl*100:.4f}% of the "
-                f"workload's own {fmt(mean_wl)} cycles."
-            )
+            if kind == "delta":
+                report_lines.append(
+                    f"> **Summary ({source_name}):** with `perf record -g -c 100K` attached, the "
+                    f"application consumed {fmt(mean_tool)} cycles vs {fmt(mean_wl)} without it "
+                    f"({(mean_tool - mean_wl)/mean_wl*100:+.4f}%)."
+                )
+            else:
+                report_lines.append(
+                    f"> **Summary ({source_name}):** `perf record -g -c 100K` consumed {fmt(mean_tool)} cycles "
+                    f"per measurement window, which is {mean_tool/mean_wl*100:.4f}% of the "
+                    f"workload's own {fmt(mean_wl)} cycles."
+                )
+
+            # Per-request overhead (constant-work Go API data only)
+            if kind == "delta" and 'requests_served' in workload_baseline.columns:
+                reqs = workload_baseline['requests_served'].dropna().values.astype(float)
+                mean_requests = np.mean(reqs) if len(reqs) > 0 else 0
+                if mean_requests > 0:
+                    mean_overhead_cycles = mean_tool - mean_wl
+                    per_request_cycles = mean_overhead_cycles / mean_requests
+                    report_lines.append("")
+                    report_lines.append(
+                        f"> **Per-request overhead:** For every {int(mean_requests)} requests, "
+                        f"`perf record` added {mean_overhead_cycles:,.0f} CPU cycles to the "
+                        f"application ({per_request_cycles:,.1f} cycles/request)."
+                    )
 
         report_lines.append("")
 
@@ -682,6 +737,10 @@ def main():
     report.append(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
     report.append("")
     report.append("---")
+    report.append("")
+    report.append("> **Metric note:** `cache_misses` contains L1-dcache-load-misses")
+    report.append("> as measured by `perf stat`. This is more specific than the former")
+    report.append("> bpftrace combined cache-misses count.")
     report.append("")
 
     # H1

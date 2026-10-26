@@ -3,10 +3,13 @@
 run_hypotheses_goapi.py — Hypothesis Testing for Go API (H1 + H4)
 
 Uses constant-work methodology (fixed request count per iteration)
-and bpftrace/eBPF as the outer measurement ruler.
+and perf stat as the outer measurement ruler. perf stat wraps the load
+generator (perf stat -p PID -- hey -n N ...), so the counting window is
+exactly the N requests.
 
 H1 (Go API portion): Measures perf record's own overhead while profiling
-    the Go API under load. Compare with dummy workload results to test
+    the Go API under load, plus the API's own cost without a profiler
+    (workload_baseline). Compare with dummy workload results to test
     "constant absolute cost" hypothesis.
 
 H4 (Production Negligibility): Measures the Go API's own hardware counters
@@ -15,7 +18,7 @@ H4 (Production Negligibility): Measures the Go API's own hardware counters
 CPU pinning:
   Go API container:   NOT pinned (realistic production)
   perf record:        CPU 7  (Core 7, Socket 0)
-  bpftrace ruler:     CPU 14 (Core 6, Socket 1)
+  perf stat ruler:    CPU 14 (Core 6, Socket 1)
 
 Usage:
   sudo python3 run_hypotheses_goapi.py --pilot            # 50 iterations
@@ -29,37 +32,32 @@ import time
 import os
 import sys
 import csv
-import signal
 from datetime import datetime
 
 # Add common/ to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'common'))
-from measure_statistically_ebpf import run_bpftrace, METRICS, format_number
+from perf_stat_ruler import measure_pid_during_command, check_perf_stat_available
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 PERF_RECORD_CPU = "7"
-BPFTRACE_CPU = "14"
+RULER_CPU = "14"  # perf stat's userspace process runs here
 
 REQUESTS_PER_ITER = 1000
 WARMUP_REQUESTS = 500
 CONCURRENCY = 10
 API_URL = "http://localhost/compute"
 
-EBPF_INFINITE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "common", "ebpf_counter_infinite.bt"
-)
-
-PERIODS = {
-    "@cycles": 100000,
-    "@cache_misses": 1000,
-    "@branch_misses": 1000,
-    "@page_faults": 1,
-    "@ctx_switches": 1,
-}
+# perf stat events — 3 hardware + 2 software, no PMU multiplexing
+PERF_STAT_EVENTS = [
+    "cycles",
+    "L1-dcache-load-misses",
+    "branch-misses",
+    "context-switches",
+    "page-faults",
+]
 
 SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -89,10 +87,13 @@ def get_api_pid():
     return None
 
 
+def hey_cmd(n):
+    return f"hey -n {n} -c {CONCURRENCY} -q 500 {API_URL}"
+
+
 def send_requests(n):
     """Send exactly n requests using hey."""
-    cmd = f"hey -n {n} -c {CONCURRENCY} -q 500 {API_URL}"
-    return run_cmd(cmd, timeout=300)
+    return run_cmd(hey_cmd(n), timeout=300)
 
 
 def warmup():
@@ -120,80 +121,19 @@ def stop_perf_record():
     time.sleep(0.2)
 
 
-def parse_bpftrace_map_dump(output):
-    """Parse bpftrace infinite counter map dump on SIGINT."""
-    import re
-    results = {}
-    metric_map = {
-        "@cycles": "cycles",
-        "@cache_misses": "cache-misses",
-        "@branch_misses": "branch-misses",
-        "@page_faults": "page-faults",
-        "@ctx_switches": "context-switches",
-    }
-    for line in output.split("\n"):
-        match = re.match(r"(@[a-z_]+):\s+(\d+)", line)
-        if match:
-            key, val = match.groups()
-            if key in metric_map:
-                period = PERIODS.get(key, 1)
-                results[metric_map[key]] = int(val) * period
-    return results
-
-
 def measure_constant_work(target_pid):
-    """Run bpftrace infinite counter, send N requests, stop, parse results.
-    
-    Returns dict of hardware event counts covering exactly REQUESTS_PER_ITER requests.
-    
-    Issue 9 fix: Waits for bpftrace 'Attaching' message instead of fixed sleep.
+    """Count TARGET_PID's hardware events over exactly REQUESTS_PER_ITER requests.
+
+    perf stat runs hey as its workload command, so counting starts before
+    the first request and stops when hey exits after the last one — no
+    idle tail and no attach race (supersedes the Issue 9 bpftrace fix).
+
+    Returns dict of hardware event counts, or None on failure.
     """
-    # Start bpftrace (infinite mode — runs until SIGINT)
-    bpf_proc = subprocess.Popen(
-        ["sudo", "bpftrace", EBPF_INFINITE, str(target_pid)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    return measure_pid_during_command(
+        target_pid, hey_cmd(REQUESTS_PER_ITER),
+        ruler_cpu=RULER_CPU, events=PERF_STAT_EVENTS, timeout=300,
     )
-
-    # Wait for bpftrace to compile and attach probes.
-    # bpftrace prints "Attaching N probes..." to stderr when ready.
-    # This replaces the old time.sleep(5) which could either:
-    #   - Count 3s of idle events if compilation finishes in 2s
-    #   - Miss the first 2s of requests if compilation takes 7s
-    import select
-    attached = False
-    attach_timeout = 30  # max seconds to wait for compilation
-    start_time = time.time()
-    while time.time() - start_time < attach_timeout:
-        # Use select to check if stderr has data (non-blocking on Linux)
-        try:
-            ready, _, _ = select.select([bpf_proc.stderr], [], [], 0.5)
-        except (ValueError, OSError):
-            break
-        if ready:
-            line = bpf_proc.stderr.readline()
-            if "Attaching" in line:
-                attached = True
-                break
-        if bpf_proc.poll() is not None:
-            # bpftrace exited prematurely
-            break
-
-    if not attached:
-        print("  ⚠️ bpftrace did not print 'Attaching' within timeout. Using fallback sleep.")
-        time.sleep(5)
-
-    # Send exactly N requests
-    send_requests(REQUESTS_PER_ITER)
-
-    # Stop bpftrace → triggers map dump
-    bpf_proc.send_signal(signal.SIGINT)
-    try:
-        stdout, stderr = bpf_proc.communicate(timeout=10)
-    except subprocess.TimeoutExpired:
-        bpf_proc.kill()
-        stdout, _ = bpf_proc.communicate()
-
-    return parse_bpftrace_map_dump(stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -226,11 +166,13 @@ class ResultsWriter:
             "config_c": config_c,
             "iteration": iteration,
             "run_type": run_type,
-            "cycles": results.get("cycles", 0),
-            "cache_misses": results.get("cache-misses", 0),
-            "branch_misses": results.get("branch-misses", 0),
-            "page_faults": results.get("page-faults", 0),
-            "context_switches": results.get("context-switches", 0),
+            # Missing metrics are left empty (NaN), never 0, so they
+            # cannot bias means. cache_misses = L1-dcache-load-misses.
+            "cycles": results.get("cycles", ""),
+            "cache_misses": results.get("L1_dcache_misses", ""),
+            "branch_misses": results.get("branch_misses", ""),
+            "page_faults": results.get("page_faults", ""),
+            "context_switches": results.get("context_switches", ""),
             "requests_served": requests,
         }
         self.writer.writerow(row)
@@ -245,26 +187,35 @@ class ResultsWriter:
 # ---------------------------------------------------------------------------
 
 def run_h1_goapi(api_pid, writer, iterations):
-    """Measure perf record's overhead while profiling the Go API under load."""
+    """Measure perf record's overhead while profiling the Go API under load.
+    Also measures the Go API's own cost without a profiler (workload_baseline)
+    so the tool/workload ratio is available for the Go API too.
+    """
     print(f"\n{'='*70}")
     print(f"  H1 (Go API): Constant Absolute Cost ({iterations} iterations)")
     print(f"  Constant work: {REQUESTS_PER_ITER} requests per iteration")
+    print(f"  Outer ruler: perf stat (CPU {RULER_CPU})")
     print(f"{'='*70}")
 
     failures = 0
     for i in range(iterations):
         print(f"  H1 iter {i+1}/{iterations} (fail: {failures})    ", end='\r')
 
+        # Phase A: API's own cost, no profiler
         warmup()
+        base_results = measure_constant_work(int(api_pid))
+        if base_results:
+            writer.write_row("H1", "off", 0, i+1,
+                             "workload_baseline", base_results, REQUESTS_PER_ITER)
 
-        # Start perf record on the API
+        # Phase B: start perf record on the API
         perf_pid = start_perf_record(api_pid, "-g -c 100000")
         if not perf_pid:
             failures += 1
             stop_perf_record()
             continue
 
-        # Measure perf record's own cost via bpftrace during N requests
+        # Measure perf record's own cost (not the API's) during N requests
         results = measure_constant_work(int(perf_pid))
         if results:
             writer.write_row("H1", "on", 100000, i+1,
@@ -313,6 +264,11 @@ def run_h4(api_pid, writer, iterations):
         # ---- Phase B: PROFILED (perf record active) ----
         warmup()
         perf_pid = start_perf_record(api_pid, "-g -c 100000")
+        if not perf_pid:
+            # Never record a "profiled" row with no profiler running
+            failures += 1
+            stop_perf_record()
+            continue
 
         prof_results = measure_constant_work(int(api_pid))
         if prof_results:
@@ -363,6 +319,9 @@ def main():
         print("  Install: go install github.com/rakyll/hey@latest")
         return
 
+    if not check_perf_stat_available(ruler_cpu=RULER_CPU):
+        return
+
     print(f"{'='*70}")
     print(f"  Hypothesis Testing — Go API (Constant Work)")
     print(f"  Session:      {SESSION_ID}")
@@ -370,7 +329,7 @@ def main():
     print(f"  Hypothesis:   {args.hypothesis}")
     print(f"  Iterations:   {args.iterations}")
     print(f"  Requests/iter: {REQUESTS_PER_ITER}")
-    print(f"  Outer ruler:  bpftrace (eBPF)")
+    print(f"  Outer ruler:  perf stat (CPU {RULER_CPU})")
     print(f"  Output:       {args.output}")
     print(f"{'='*70}")
 

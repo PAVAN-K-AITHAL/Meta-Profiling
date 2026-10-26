@@ -26,7 +26,7 @@ results/
 !meta_profiling_deliverables/results/
 *.json.log
 *.csv
-!meta_profiling_deliverables/results/*.csv
+!meta_profiling_deliverables/results/**/*.csv
 
 # --- perf artifacts (Phase 2) ---
 perf.data
@@ -57,3 +57,10 @@ logs/
 # --- Miscellaneous temp files ---
 tmp/
 scratch/
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Personal files kept out of the repo ---
+CDSAML_internship_template.pptx

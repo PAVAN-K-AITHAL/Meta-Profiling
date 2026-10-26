@@ -1,35 +1,50 @@
 # Performance Analysis: Meta-Profiling
 
-This repository contains the architecture, target application, and scripts for our **Meta-Profiling (Instrumentation of Instrumentation)** research project. 
+This repository contains the architecture, target application, and scripts for our **Meta-Profiling (Instrumentation of Instrumentation)** research project.
 
-Our research focuses on quantifying the "observer effect" of Linux profiling tools (like `perf`, `eBPF`, and `/proc`) on a multi-tier microservice architecture.
+Our research quantifies the "observer effect" of Linux profiling tools: how much hardware does `perf record` itself consume? We measure it with a three-layer, NUMA-aware isolation setup on an Intel Xeon E5-2620 v4, using `perf stat` (exact PMU counts) as the outer ruler, and test four hypotheses (H1–H4) with formal statistics.
 
 ## Repository Structure
 
-- **[`meta_profiling_deliverables/`](meta_profiling_deliverables/)**: The core deliverables for the meta-profiling thesis, including automated benchmark makefiles, Python statistical scripts (using Welch's t-test), eBPF probes, and core isolation setup. 
-  - **Start here:** Please see the [Go API Experiment Guide](meta_profiling_deliverables/goapi_experiment_guide.md) for detailed instructions on running the automated meta-profiling pipeline.
-  - Also review the [Meta-Profiling README](meta_profiling_deliverables/README.md) for an overview of the specific mentor requirements addressed (CPU isolation, statistical significance, eBPF counting, etc.).
+- **[`meta_profiling_deliverables/`](meta_profiling_deliverables/)**: the experiment pipeline.
+  - [`run_full_experiments.sh`](meta_profiling_deliverables/run_full_experiments.sh): runs everything (data collection → analysis → figures).
+  - [`verify_setup.sh`](meta_profiling_deliverables/verify_setup.sh): checks CPU isolation, PMU counters and tools, then runs a pilot.
+  - [`common/`](meta_profiling_deliverables/common/): `perf_stat_ruler.py` (outer ruler), `analyze_hypotheses.py` (statistics, Holm-Bonferroni), `generate_figures.py` (paper figures), system hardening scripts, and bpftrace scripts kept for diagnostics.
+  - [`dummy_workload_test/`](meta_profiling_deliverables/dummy_workload_test/): H1/H2/H3 on a CPU-bound workload (`lat_mem_rd`).
+  - [`go_api_test/`](meta_profiling_deliverables/go_api_test/): H1/H4 on the Go microservice, constant-work methodology.
+  - [`results/`](meta_profiling_deliverables/results/): experiment outputs. `archive_bpftrace/` holds earlier data collected with the bpftrace ruler (see [docs/analysis_results.md](docs/analysis_results.md) for its known issues).
 
-- **[`microservice/`](microservice/)**: The target Go REST API. It is instrumented with custom Prometheus metrics and exposes `/metrics`, `/healthz`, `/users` (I/O-bound), and `/compute` (CPU-bound) endpoints.
+- **[`docs/`](docs/)**: hypothesis framework, NUMA topology analysis, code review findings and project notes.
 
-- **[`config/`](config/)**: Configuration files for the surrounding observability stack (Prometheus, Nginx, PostgreSQL, Grafana).
+- **[`microservice/`](microservice/)**: the target Go REST API, instrumented with Prometheus metrics. Exposes `/metrics`, `/healthz`, `/users` (I/O-bound) and `/compute` (CPU-bound).
 
-- **[`loadtest/`](loadtest/)**: `k6` scripts used to generate stable, baseline traffic against the microservice during profiling.
+- **[`config/`](config/)**: configuration for the surrounding observability stack (Prometheus, Nginx, PostgreSQL, Grafana).
 
-- **`docker-compose.yml`**: The orchestration file that boots the entire multi-tier stack, providing a stable target for our profilers.
+- **[`loadtest/`](loadtest/)**: `k6` scripts for generating traffic against the microservice.
 
-## Running the Meta-Profiling Pipeline
+- **`docker-compose.yml`**: boots the multi-tier stack that the Go API experiments profile.
 
-Everything is automated via Makefiles. To run a full 1000-iteration statistical test against the Go API:
+## CPU Roles
+
+| CPU | Role |
+|-----|------|
+| 6  | workload (`lat_mem_rd`) |
+| 7  | `perf record` (tool under study) |
+| 14 | `perf stat` (outer ruler, other socket) |
+
+Required kernel parameter: `isolcpus=6,7,14,15,22,23,30,31` (includes the hyper-thread siblings).
+
+## Running the Pipeline
 
 ```bash
 cd meta_profiling_deliverables
-make -f Makefile.goapi
+
+# 1. Verify the machine (isolation, PMU counters, tools) and run a short pilot
+sudo bash verify_setup.sh --quick
+
+# 2. Full run: H1–H4, analysis report and figures
+sudo bash run_full_experiments.sh            # 500 iterations
+sudo bash run_full_experiments.sh --pilot    # 50 iterations
 ```
 
-This will automatically:
-1. Boot the Docker stack.
-2. Spin up `k6` to apply baseline load.
-3. Discover the Go API PID on the host.
-4. Execute `measure_statistically.py` (which internally orchestrates `perf record` on isolated CPUs and measures its overhead using `perf stat`).
-5. Shut down the stack and output a statistically sound CSV of the overhead.
+Each run writes a session folder under `results/` containing the CSVs, the system state, `analysis_report.md` and `figures/`.

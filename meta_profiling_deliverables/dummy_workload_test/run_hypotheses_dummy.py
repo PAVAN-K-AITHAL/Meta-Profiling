@@ -2,17 +2,18 @@
 """
 run_hypotheses_dummy.py — Unified Hypothesis Testing for CPU-Bound Workload
 
-Measurement methodology (per mentor guidance):
-  eBPF (bpftrace) measures perf record's OWN PID to count the exact
-  hardware events (cycles, cache-misses, branch-misses) consumed by
-  the profiling tool itself.  This is the "instrumentation of
-  instrumentation" approach — a non-sampling outer ruler counting
-  the inner tool's overhead via kernel probes.
+Measurement methodology:
+  perf stat (counting mode, exact PMU register reads) measures perf
+  record's OWN PID to count the hardware events (cycles, L1-dcache
+  misses, branch-misses) consumed by the profiling tool itself.  This is
+  the "instrumentation of instrumentation" approach — a non-sampling
+  outer ruler counting the inner tool's overhead.  bpftrace is kept for
+  diagnostics only (see common/ebpf_counter*.bt).
 
 Per-iteration flow:
-  1. [Workload baseline] bpftrace → workload PID (no profiler)
+  1. [Workload baseline] perf stat -C 6 (no profiler)
   2. Start perf record (inner tool under study) on CPU 7
-  3. [Tool overhead] bpftrace → perf record's PID for DURATION seconds
+  3. [Tool overhead] perf stat -p <perf record PID> for DURATION seconds
   4. Stop perf record
   5. Record both measurements to CSV
 
@@ -29,7 +30,7 @@ Data format:
 CPU pinning (Intel Xeon E5-2620 v4, isolated: 6,7,14,15):
   Workload (lat_mem_rd):  CPU 6  (Core 6, Socket 0)
   perf record:            CPU 7  (Core 7, Socket 0)
-  bpftrace:               unpinned (BPF probes fire in kernel on target CPU)
+  perf stat (ruler):      CPU 14 (Core 6, Socket 1)
 
 Usage:
   sudo python3 run_hypotheses_dummy.py --pilot            # 50 iterations
@@ -48,7 +49,11 @@ from datetime import datetime
 
 # Add common/ to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'common'))
-from measure_statistically_ebpf import run_bpftrace, run_bpftrace_cpu, run_bpftrace_pid_cpu, METRICS, format_number
+from perf_stat_ruler import (
+    measure_pid_perf_stat, measure_cpu_perf_stat, check_perf_stat_available
+)
+# bpftrace helpers are diagnostic only; reuse the number formatter
+from measure_statistically_ebpf import format_number
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -56,7 +61,17 @@ from measure_statistically_ebpf import run_bpftrace, run_bpftrace_cpu, run_bpftr
 
 WORKLOAD_CPU = "6"
 PERF_RECORD_CPU = "7"
+RULER_CPU = "14"  # perf stat's userspace process runs here
 DURATION = 5  # seconds per measurement window (5s for better accumulation)
+
+# perf stat events — 3 hardware + 2 software, no PMU multiplexing
+PERF_STAT_EVENTS = [
+    "cycles",
+    "L1-dcache-load-misses",
+    "branch-misses",
+    "context-switches",
+    "page-faults",
+]
 
 # H2: sampling period configs (from most aggressive to least)
 H2_CONFIGS = [1000, 10000, 50000, 100000, 500000, 1000000]
@@ -207,11 +222,13 @@ class ResultsWriter:
             "config_c": config_c,
             "iteration": iteration,
             "run_type": run_type,
-            "cycles": results.get("cycles", 0),
-            "cache_misses": results.get("cache-misses", 0),
-            "branch_misses": results.get("branch-misses", 0),
-            "page_faults": results.get("page-faults", 0),
-            "context_switches": results.get("context-switches", 0),
+            # Missing metrics are left empty (NaN), never 0, so they
+            # cannot bias means. cache_misses = L1-dcache-load-misses.
+            "cycles": results.get("cycles", ""),
+            "cache_misses": results.get("L1_dcache_misses", ""),
+            "branch_misses": results.get("branch_misses", ""),
+            "page_faults": results.get("page_faults", ""),
+            "context_switches": results.get("context_switches", ""),
         }
         self.writer.writerow(row)
         self.file.flush()
@@ -225,37 +242,36 @@ class ResultsWriter:
 # ---------------------------------------------------------------------------
 
 def measure_workload_baseline(duration):
-    """Measure the WORKLOAD's own hardware counters via bpftrace.
+    """Measure the WORKLOAD CPU's hardware counters via perf stat -C 6.
     No profiler is running during this measurement.
     This gives the denominator for H4 (overhead ratio = tool / workload).
 
-    Uses CPU-based filtering (not PID) because the workload runs
-    lat_mem_rd in a while-true loop — each invocation exits and restarts
-    with a different PID. CPU filtering on an isolated CPU is immune
-    to this PID churn. (Issue 1 fix)
+    CPU-wide counting (not PID) because the workload runs lat_mem_rd in a
+    while-true loop — each invocation restarts with a different PID.
+    Counting an isolated CPU is immune to this PID churn. (Issue 1 fix)
     """
-    return run_bpftrace_cpu(WORKLOAD_CPU, duration)
+    return measure_cpu_perf_stat(WORKLOAD_CPU, duration,
+                                 ruler_cpu=RULER_CPU, events=PERF_STAT_EVENTS)
 
 
 def measure_tool_overhead(perf_pid, duration):
-    """Measure PERF RECORD's own hardware counters via bpftrace.
+    """Measure PERF RECORD's own hardware counters via perf stat -p.
 
     This is the core measurement — the profiling tool's own resource
-    consumption (cycles, cache-misses, branch-misses).  bpftrace counts
-    hardware events attributed to perf record's PID on its pinned CPU.
+    consumption.  perf stat's per-thread counters only run while perf
+    record is scheduled (CPU 7), so they use CPU 7's PMU; perf record's
+    sampling counter is on CPU 6's PMU.  No PMU sharing (Issue 2), no
+    ruler NMIs (Issue 3), exact counts (Issue 4).
 
-    Uses dual PID+CPU filter (ebpf_counter_pid_cpu.bt) to:
-      - Eliminate PMU contention on CPU 6 where perf record samples (Issue 2)
-      - Reduce NMI observer effect by limiting probe scope (Issue 3)
-
-    Note: this captures perf record's USERSPACE processing overhead
-    (ring buffer reads, file writes, symbol resolution).  The NMI
-    handler overhead runs in interrupt context under the workload's
-    PID and is not captured by PID-filtered probes.
+    Note: this captures perf record's own process (ring buffer reads,
+    file writes, plus its syscalls in kernel mode).  The sampling NMI
+    handler runs in interrupt context on CPU 6 and is attributed to the
+    workload, not to perf record's PID.
     """
     if not perf_pid:
         return None
-    return run_bpftrace_pid_cpu(perf_pid, PERF_RECORD_CPU, duration)
+    return measure_pid_perf_stat(int(perf_pid), duration,
+                                 ruler_cpu=RULER_CPU, events=PERF_STAT_EVENTS)
 
 
 # ---------------------------------------------------------------------------
@@ -266,16 +282,16 @@ def run_h1(writer, iterations, workload_name):
     """Measure perf record's own resource consumption with -g -c 100K.
 
     Each iteration:
-      1. Measure workload baseline (bpftrace on workload PID, no profiler)
+      1. Measure workload baseline (perf stat -C 6, no profiler)
       2. Start perf record -g -c 100K
-      3. Measure tool overhead (bpftrace on perf record PID)
+      3. Measure tool overhead (perf stat on perf record PID)
       4. Stop perf record
     """
     print(f"\n{'='*70}")
     print(f"  H1: Constant Absolute Cost ({iterations} iterations)")
     print(f"  Measuring perf record -g -c 100K own resource consumption")
-    print(f"  Method: bpftrace on perf record's PID")
-    print(f"  Outer ruler: bpftrace (eBPF), {DURATION}s window")
+    print(f"  Method: perf stat on perf record's PID")
+    print(f"  Outer ruler: perf stat (CPU {RULER_CPU}), {DURATION}s window")
     print(f"{'='*70}")
 
     failures = 0
@@ -457,10 +473,14 @@ def main():
     print(f"  Workload: {workload_name} (PID {workload_pid}, CPU {WORKLOAD_CPU})")
 
     # ---------------------------------------------------------------
-    # Sanity check: verify bpftrace can measure PERF RECORD's PID
+    # Sanity check: verify perf stat can measure PERF RECORD's PID
     # This is the critical validation — the entire experiment depends
-    # on bpftrace being able to count events for perf record's PID.
+    # on perf stat being able to count events for perf record's PID.
     # ---------------------------------------------------------------
+    if not check_perf_stat_available(ruler_cpu=RULER_CPU):
+        stop_workload(workload_name)
+        return
+
     print(f"\n  Sanity check: starting perf record and measuring its PID...")
     test_perf_pid = start_perf_record("-g -c 100000")
     if not test_perf_pid:
@@ -469,45 +489,48 @@ def main():
         return
 
     print(f"  perf record PID: {test_perf_pid}")
-    print(f"  Running bpftrace for {DURATION}s against perf record PID+CPU {PERF_RECORD_CPU}...")
-    test_result = run_bpftrace_pid_cpu(test_perf_pid, PERF_RECORD_CPU, DURATION)
+    print(f"  Running perf stat for {DURATION}s against perf record PID {test_perf_pid}...")
+    test_result = measure_pid_perf_stat(int(test_perf_pid), DURATION,
+                                        ruler_cpu=RULER_CPU,
+                                        events=PERF_STAT_EVENTS, verbose=True)
     stop_perf_record()
     if test_result:
         print(f"  ✅ Sanity check PASSED — got {len(test_result)} metrics from perf record")
         for k, v in test_result.items():
             print(f"     {k}: {format_number(v)}")
     else:
-        print("  ❌ Sanity check FAILED — bpftrace returned no data for perf record's PID.")
+        print("  ❌ Sanity check FAILED — perf stat returned no data for perf record's PID.")
         print("  Possible causes:")
-        print("    - bpftrace cannot attach hardware probes (check: sudo bpftrace -l 'hardware:*')")
-        print("    - Overflow periods still too high (check ebpf_counter.bt)")
-        print("    - perf record PID mismatch (try: pgrep -x perf)")
+        print("    - perf_event_paranoid > -1 (run: sudo sysctl kernel.perf_event_paranoid=-1)")
+        print("    - counters multiplexed (NMI watchdog: sudo sysctl kernel.nmi_watchdog=0)")
+        print(f"    - CPU {RULER_CPU} not isolated (check: grep isolcpus /proc/cmdline)")
+        print("    - perf record exited too fast (try: pgrep -x perf)")
         print("  Aborting.")
         stop_workload(workload_name)
         return
 
-    # Also verify we can measure the workload via CPU-based filtering
-    print(f"\n  Verifying workload baseline measurement (CPU {WORKLOAD_CPU} filter)...")
-    wl_result = run_bpftrace_cpu(WORKLOAD_CPU, DURATION)
+    # Also verify we can measure the workload CPU
+    print(f"\n  Verifying workload baseline measurement (perf stat -C {WORKLOAD_CPU})...")
+    wl_result = measure_workload_baseline(DURATION)
     if wl_result:
         print(f"  ✅ Workload baseline OK — got {len(wl_result)} metrics")
         for k, v in wl_result.items():
             print(f"     {k}: {format_number(v)}")
     else:
-        print("  ⚠️ Could not measure workload baseline via CPU filter. H4 ratio data will be missing.")
+        print("  ⚠️ Could not measure workload baseline. H4 ratio data will be missing.")
 
     # ---------------------------------------------------------------
     # Time estimation
     # ---------------------------------------------------------------
-    # Each bpftrace call: ~DURATION + 10s compilation overhead
-    bpf_time = DURATION + 12  # conservative estimate per bpftrace call
+    # Each perf stat call: DURATION + ~1s startup/teardown (no compilation)
+    stat_time = DURATION + 1
     time_map = {
         # H1: per iter: 1 baseline + 1 tool + cooldowns
-        "H1": iters * (bpf_time + 1 + 1 + bpf_time + 2),
+        "H1": iters * (stat_time + 1 + 1 + stat_time + 2),
         # H2: per block: 1 baseline + 6 configs × (start + tool + cooldown)
-        "H2": iters * (bpf_time + 1 + len(H2_CONFIGS) * (1 + bpf_time + 2)),
+        "H2": iters * (stat_time + 1 + len(H2_CONFIGS) * (1 + stat_time + 2)),
         # H3: per block: 1 baseline + 2 configs × (start + tool + cooldown)
-        "H3": iters * (bpf_time + 1 + len(H3_CONFIGS) * (1 + bpf_time + 2)),
+        "H3": iters * (stat_time + 1 + len(H3_CONFIGS) * (1 + stat_time + 2)),
     }
     if args.hypothesis == "all":
         total_sec = sum(time_map.values())
@@ -522,7 +545,7 @@ def main():
     print(f"  Iterations:   {iters} per hypothesis")
     print(f"  Duration:     {DURATION}s per measurement window")
     print(f"  Est. time:    ~{est_min:.0f} minutes")
-    print(f"  Method:       bpftrace on perf record's OWN PID")
+    print(f"  Method:       perf stat on perf record's OWN PID (CPU {RULER_CPU})")
     print(f"  Inner tool:   perf record on CPU {PERF_RECORD_CPU}")
     print(f"  Output:       {args.output}")
     print(f"{'='*70}")
