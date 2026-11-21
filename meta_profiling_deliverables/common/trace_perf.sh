@@ -26,7 +26,7 @@ echo ""
 # -p function_graph: Use the function graph tracer
 # -F: Follow only the specified command
 # -o: Output file
-sudo trace-cmd record -p function_graph -F -o $TRACE_FILE perf record -g -e cycles:k -c 100000 -p $APP_PID -- sleep 2
+sudo trace-cmd record -p function_graph -F -o $TRACE_FILE perf record -g -e cycles -c 100000 -p $APP_PID -- sleep 2
 
 echo "Tracing complete."
 echo "You can read the report by running: trace-cmd report -i $TRACE_FILE | less"

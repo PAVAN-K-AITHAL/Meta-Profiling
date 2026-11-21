@@ -54,6 +54,8 @@ from perf_stat_ruler import (
 )
 # bpftrace helpers are diagnostic only; reuse the number formatter
 from measure_statistically_ebpf import format_number
+from perf_record_stats import (stop_and_read, stop_perf_record_graceful,
+                               configure_sample_rate_limits)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -63,6 +65,7 @@ WORKLOAD_CPU = "6"
 PERF_RECORD_CPU = "7"
 RULER_CPU = "14"  # perf stat's userspace process runs here
 DURATION = 5  # seconds per measurement window (5s for better accumulation)
+PERF_DATA = "/tmp/perf-hypothesis.data"
 
 # perf stat events — 3 hardware + 2 software, no PMU multiplexing
 PERF_STAT_EVENTS = [
@@ -161,10 +164,13 @@ def start_perf_record(flags="-g -c 100000"):
     """
     run_cmd("pkill -9 -x perf 2>/dev/null")
     time.sleep(0.3)
-    # -C profiles the whole CPU, not a PID — robust against pid churn
+    # -C profiles the whole CPU, not a PID — robust against pid churn.
+    # -e cycles (user + kernel, perf's default event) makes the sample rate
+    # deterministic: CPU freq / c. cycles:k only sampled lat_mem_rd's rare
+    # kernel time, so perf record's cost tracked workload restarts.
     cmd = (
         f"nohup taskset -c {PERF_RECORD_CPU} perf record {flags} "
-        f"-e cycles:k -C {WORKLOAD_CPU} -o /tmp/perf-hypothesis.data "
+        f"-e cycles -C {WORKLOAD_CPU} -o {PERF_DATA} "
         f"> /dev/null 2>&1 &"
     )
     os.system(cmd)
@@ -175,10 +181,7 @@ def start_perf_record(flags="-g -c 100000"):
 
 
 def stop_perf_record():
-    run_cmd("pkill -INT -x perf 2>/dev/null")  # graceful stop first
-    time.sleep(0.3)
-    run_cmd("pkill -9 -x perf 2>/dev/null")    # force kill
-    time.sleep(0.2)
+    stop_perf_record_graceful()
 
 
 def refresh_workload_pid():
@@ -201,7 +204,9 @@ class ResultsWriter:
         "session_id", "timestamp", "hypothesis", "workload", "config_g",
         "config_c", "iteration", "run_type",
         "cycles", "cache_misses", "branch_misses",
-        "page_faults", "context_switches"
+        "page_faults", "context_switches",
+        # perf record data quality (tool_overhead rows only; >0 = invalid run)
+        "lost_events", "throttle_events",
     ]
 
     def __init__(self, output_path):
@@ -229,6 +234,8 @@ class ResultsWriter:
             "branch_misses": results.get("branch_misses", ""),
             "page_faults": results.get("page_faults", ""),
             "context_switches": results.get("context_switches", ""),
+            "lost_events": results.get("lost_events", ""),
+            "throttle_events": results.get("throttle_events", ""),
         }
         self.writer.writerow(row)
         self.file.flush()
@@ -314,7 +321,11 @@ def run_h1(writer, iterations, workload_name):
             continue
 
         tool_data = measure_tool_overhead(perf_pid, DURATION)
-        stop_perf_record()
+        quality = stop_and_read(PERF_DATA)  # lost/throttle flags
+        if tool_data:
+            tool_data.update(quality)
+            if quality['lost_events'] or quality['throttle_events']:
+                print(f"\n  ⚠️ iter {i+1}: lost={quality['lost_events']} throttle={quality['throttle_events']} — flagged")
 
         if tool_data:
             writer.write_row("H1", workload_name, "on", 100000,
@@ -370,7 +381,11 @@ def run_h2(writer, iterations, workload_name):
                 continue
 
             tool_data = measure_tool_overhead(perf_pid, DURATION)
-            stop_perf_record()
+            quality = stop_and_read(PERF_DATA)  # lost/throttle flags
+            if tool_data:
+                tool_data.update(quality)
+                if quality['lost_events'] or quality['throttle_events']:
+                    print(f"\n  ⚠️ iter {i+1}: lost={quality['lost_events']} throttle={quality['throttle_events']} — flagged")
 
             if tool_data:
                 writer.write_row("H2", workload_name, "on", c_val,
@@ -424,7 +439,11 @@ def run_h3(writer, iterations, workload_name):
                 continue
 
             tool_data = measure_tool_overhead(perf_pid, DURATION)
-            stop_perf_record()
+            quality = stop_and_read(PERF_DATA)  # lost/throttle flags
+            if tool_data:
+                tool_data.update(quality)
+                if quality['lost_events'] or quality['throttle_events']:
+                    print(f"\n  ⚠️ iter {i+1}: lost={quality['lost_events']} throttle={quality['throttle_events']} — flagged")
 
             if tool_data:
                 writer.write_row("H3", workload_name, config_g, 100000,
@@ -462,6 +481,8 @@ def main():
         print("  🧪 PILOT MODE: 50 iterations per hypothesis\n")
 
     iters = args.iterations
+
+    configure_sample_rate_limits()
 
     # Start the workload
     print("  Starting workload...")

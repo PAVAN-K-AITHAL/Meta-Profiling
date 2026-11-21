@@ -114,6 +114,9 @@ if [ "${PARANOID}" -le -1 ]; then pass "perf_event_paranoid=${PARANOID}"; else w
 WD="$(cat /proc/sys/kernel/nmi_watchdog 2>/dev/null || echo 0)"
 if [ "${WD}" = 0 ]; then pass "nmi_watchdog=0 (no PMU counter reserved)"; else warn "nmi_watchdog=${WD} — holds a PMU counter; if counts get multiplexed: sysctl -w kernel.nmi_watchdog=0"; fi
 
+SR="$(cat /proc/sys/kernel/perf_event_max_sample_rate)"; CT="$(cat /proc/sys/kernel/perf_cpu_time_max_percent)"
+if [ "${SR}" -ge 10000000 ] && [ "${CT}" = 0 ]; then pass "sample-rate cap lifted (max_sample_rate=${SR}, cpu_time_max_percent=0)"
+else warn "max_sample_rate=${SR} cpu_time_max_percent=${CT} — runners lift these at start (sysctl -w kernel.perf_event_max_sample_rate=10000000 then kernel.perf_cpu_time_max_percent=0)"; fi
 # Real counter test: all events counted, 100% running (no multiplexing)
 OUT="$(taskset -c ${RULER_CPU} perf stat -x, -C ${WORKLOAD_CPU} -e ${EVENTS} -- sleep 1 2>&1 >/dev/null)"
 for ev in ${EVENTS//,/ }; do

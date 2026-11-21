@@ -27,7 +27,7 @@ sleep 3
 
 # 3. Start perf record
 echo "[+] Started perf record on CPU 7. Capturing data..."
-taskset -c 7 perf record -g -e cycles:k -c 100000 -p $APP_PID -o /tmp/kprobe-perf.data 2>/dev/null &
+taskset -c 7 perf record -g -e cycles -c 100000 -p $APP_PID -o /tmp/kprobe-perf.data 2>/dev/null &
 PERF_PID=$!
 
 # Let it profile for 5 seconds

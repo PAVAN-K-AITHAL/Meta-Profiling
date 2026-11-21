@@ -703,6 +703,33 @@ def format_correction_table(corrected):
 
 REQUESTS_DEFAULT = 1000
 
+def drop_invalid_runs(df, label):
+    """Remove runs where perf record was throttled or lost samples.
+
+    Such a run did less sampling work than its -c asked for, so its cost is
+    capped rather than measured. Returns (clean_df, markdown_lines).
+    Unknown flags (empty: stats unreadable) are kept but counted.
+    """
+    if df is None or 'lost_events' not in df.columns:
+        return df, []
+    lost = pd.to_numeric(df['lost_events'], errors='coerce')
+    thr = pd.to_numeric(df['throttle_events'], errors='coerce')
+    bad = (lost > 0) | (thr > 0)
+    profiled = df['run_type'].isin(['tool_overhead', 'profiled'])
+    unknown = profiled & lost.isna() & thr.isna()
+    lines = [f"**{label}:** {int(bad.sum())} of {int(profiled.sum())} profiled "
+             f"runs excluded (throttled or lost samples); "
+             f"{int(unknown.sum())} with unreadable flags kept."]
+    if bad.any():
+        lines += ["", "| Hypothesis | -c | Excluded | Total |", "|---|---|---|---|"]
+        for (h, c), g in df[profiled].groupby(['hypothesis', 'config_c']):
+            nb = int(bad[g.index].sum())
+            if nb:
+                lines.append(f"| {h} | {c} | {nb} | {len(g)} |")
+    print(f"  {label}: excluded {int(bad.sum())} throttled/lost runs")
+    return df[~bad], lines + [""]
+
+
 def main():
     global REQUESTS_DEFAULT
     parser = argparse.ArgumentParser(
@@ -729,6 +756,10 @@ def main():
         goapi_df = pd.read_csv(args.goapi)
         print(f"  Go API CSV: {len(goapi_df)} rows")
 
+    dummy_df, dq_lines = drop_invalid_runs(dummy_df, "Dummy workload")
+    goapi_df, dq_goapi = drop_invalid_runs(goapi_df, "Go API")
+    dq_lines += dq_goapi
+
     all_results = []
     report = []
 
@@ -736,6 +767,10 @@ def main():
     report.append("")
     report.append(f"Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
     report.append("")
+    if dq_lines:
+        report.append("## Data Quality (perf record throttling / lost samples)")
+        report.append("")
+        report.extend(dq_lines)
     report.append("---")
     report.append("")
     report.append("> **Metric note:** `cache_misses` contains L1-dcache-load-misses")

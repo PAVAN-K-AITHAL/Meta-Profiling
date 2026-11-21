@@ -37,6 +37,10 @@ from datetime import datetime
 # Add common/ to path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'common'))
 from perf_stat_ruler import measure_pid_during_command, check_perf_stat_available
+from perf_record_stats import (stop_and_read, stop_perf_record_graceful,
+                               configure_sample_rate_limits)
+
+PERF_DATA = "/tmp/perf-hyp-goapi.data"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -106,7 +110,7 @@ def start_perf_record(target_pid, flags="-g -c 100000"):
     time.sleep(0.2)
     cmd = (
         f"taskset -c {PERF_RECORD_CPU} perf record {flags} "
-        f"-e cycles:k -p {target_pid} -o /tmp/perf-hyp-goapi.data "
+        f"-e cycles -p {target_pid} -o {PERF_DATA} "
         f">/dev/null 2>&1 &"
     )
     run_cmd(cmd)
@@ -117,8 +121,7 @@ def start_perf_record(target_pid, flags="-g -c 100000"):
 
 
 def stop_perf_record():
-    run_cmd("pkill -9 -x perf 2>/dev/null")
-    time.sleep(0.2)
+    stop_perf_record_graceful()
 
 
 def measure_constant_work(target_pid):
@@ -145,7 +148,9 @@ class ResultsWriter:
         "session_id", "timestamp", "hypothesis", "workload", "config_g",
         "config_c", "iteration", "run_type",
         "cycles", "cache_misses", "branch_misses",
-        "page_faults", "context_switches", "requests_served"
+        "page_faults", "context_switches", "requests_served",
+        # perf record data quality (rows with a profiler; >0 = invalid run)
+        "lost_events", "throttle_events",
     ]
 
     def __init__(self, output_path):
@@ -174,6 +179,8 @@ class ResultsWriter:
             "page_faults": results.get("page_faults", ""),
             "context_switches": results.get("context_switches", ""),
             "requests_served": requests,
+            "lost_events": results.get("lost_events", ""),
+            "throttle_events": results.get("throttle_events", ""),
         }
         self.writer.writerow(row)
         self.file.flush()
@@ -217,13 +224,13 @@ def run_h1_goapi(api_pid, writer, iterations):
 
         # Measure perf record's own cost (not the API's) during N requests
         results = measure_constant_work(int(perf_pid))
+        quality = stop_and_read(PERF_DATA)  # lost/throttle flags
         if results:
+            results.update(quality)
             writer.write_row("H1", "on", 100000, i+1,
                              "tool_overhead", results, REQUESTS_PER_ITER)
         else:
             failures += 1
-
-        stop_perf_record()
         time.sleep(2)
 
     print(f"\n  H1 (Go API) complete. Failures: {failures}/{iterations}")
@@ -271,13 +278,13 @@ def run_h4(api_pid, writer, iterations):
             continue
 
         prof_results = measure_constant_work(int(api_pid))
+        quality = stop_and_read(PERF_DATA)  # lost/throttle flags
         if prof_results:
+            prof_results.update(quality)
             writer.write_row("H4", "on", 100000, i+1,
                              "profiled", prof_results, REQUESTS_PER_ITER)
         else:
             failures += 1
-
-        stop_perf_record()
         time.sleep(2)  # cooldown
 
     print(f"\n  H4 complete. Failures: {failures}/{iterations}")
@@ -319,6 +326,7 @@ def main():
         print("  Install: go install github.com/rakyll/hey@latest")
         return
 
+    configure_sample_rate_limits()
     if not check_perf_stat_available(ruler_cpu=RULER_CPU):
         return
 

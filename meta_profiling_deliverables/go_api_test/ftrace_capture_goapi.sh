@@ -66,7 +66,7 @@ sudo taskset -c 14 trace-cmd record \
     --max-graph-depth 10 \
     -F \
     -o "$TRACE_FILE" \
-    -- taskset -c 7 perf record -g -e cycles:k -c "$SAMPLING_PERIOD" \
+    -- taskset -c 7 perf record -g -e cycles -c "$SAMPLING_PERIOD" \
        -p "$APP_PID" -o /tmp/goapi-perf-ftrace-data.data \
        -- sleep "$DURATION"
 
