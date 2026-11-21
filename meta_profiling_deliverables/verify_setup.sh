@@ -127,8 +127,10 @@ for ev in ${EVENTS//,/ }; do
         pass "event ${ev} counted exactly (${val})"
     fi
 done
-# perf stat -p (the tool_overhead path) on a throwaway process
-sleep 5 & SPID=$!
+# perf stat -p (the tool_overhead path) on a throwaway process.
+# Must be a *busy* process: a sleeping one is never scheduled during the
+# window, so perf reports "<not counted>" even though attach succeeded.
+timeout 5 bash -c 'while :; do :; done' & SPID=$!
 OUT="$(taskset -c ${RULER_CPU} perf stat -x, -p ${SPID} -e cycles,context-switches -- sleep 1 2>&1 >/dev/null)"
 kill ${SPID} 2>/dev/null; wait ${SPID} 2>/dev/null
 if grep -qE '^[0-9]+,[^,]*,context-switches' <<< "${OUT}"; then pass "perf stat -p <pid> attaches"; else fail "perf stat -p failed: ${OUT}"; fi
