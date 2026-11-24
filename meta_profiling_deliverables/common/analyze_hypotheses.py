@@ -120,7 +120,23 @@ def normality_check(data, alpha=0.05):
 # H1 Analysis: Constant Absolute Cost
 # ---------------------------------------------------------------------------
 
-def analyze_h1(dummy_df, goapi_df=None):
+def welch_anova(groups):
+    """Welch's ANOVA p-value (equals Welch's t-test for two groups)."""
+    k = len(groups)
+    n = np.array([len(g) for g in groups], dtype=float)
+    m = np.array([np.mean(g) for g in groups])
+    v = np.array([np.var(g, ddof=1) for g in groups])
+    if (n < 2).any() or (v == 0).any():
+        return float('nan')
+    w = n / v
+    grand = np.sum(w * m) / np.sum(w)
+    lam = np.sum((1 - w / np.sum(w)) ** 2 / (n - 1))
+    num = np.sum(w * (m - grand) ** 2) / (k - 1)
+    den = 1 + 2 * (k - 2) / (k ** 2 - 1) * lam
+    return float(stats.f.sf(num / den, k - 1, (k ** 2 - 1) / (3 * lam)))
+
+
+def analyze_h1(dummy_df, goapi_df=None, latmem_df=None):
     """H1: Is perf record's overhead constant across workloads?
     
     Primary format: tool_overhead rows contain perf record's own counters.
@@ -193,7 +209,12 @@ def analyze_h1(dummy_df, goapi_df=None):
         report_lines.append("")
 
     # Cross-workload comparison (if Go API data also provided)
-    groups = {'dummy': tool_overhead}
+    groups = {str(tool_overhead['workload'].iloc[0]): tool_overhead}
+    if latmem_df is not None:
+        latmem_tool = latmem_df[(latmem_df['hypothesis'] == 'H1') &
+                                (latmem_df['run_type'] == 'tool_overhead')]
+        if not latmem_tool.empty:
+            groups['lat_mem_rd'] = latmem_tool
     if goapi_df is not None:
         h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
         goapi_tool = h1_goapi[h1_goapi['run_type'] == 'tool_overhead']
@@ -221,34 +242,27 @@ def analyze_h1(dummy_df, goapi_df=None):
                     )
                 continue
 
-            all_groups = list(group_data.values())
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                if len(all_groups) == 2:
-                    _, anova_p = stats.ttest_ind(all_groups[0], all_groups[1], equal_var=False)
-                else:
-                    anova_p = stats.f_oneway(*all_groups).pvalue
-
-            if len(all_groups) == 2:
-                tost_p, _, _, ci_lo, ci_hi, delta = tost_test(
-                    all_groups[0], all_groups[1], 0.10
-                )
-                d = cohens_d(all_groups[0], all_groups[1])
-                equiv = "✅ YES" if tost_p < 0.05 else "❌ NO"
-            else:
-                tost_p = float('nan')
-                d = 0
-                equiv = "—"
-
-            results.append({"test": "H1", "metric": metric, "p_value": anova_p, "test_type": "ANOVA"})
-            if not np.isnan(tost_p):
-                results.append({"test": "H1", "metric": metric, "p_value": tost_p, "test_type": "TOST"})
-
-            for name, vals in group_data.items():
+            names = list(group_data)
+            ref = group_data[names[0]]
+            anova_p = welch_anova(list(group_data.values()))
+            if not np.isnan(anova_p):
+                results.append({"test": "H1", "metric": metric, "p_value": anova_p, "test_type": "ANOVA"})
+            report_lines.append(
+                f"| {metric} | {names[0]} (ref) | {len(ref)} | {fmt(np.mean(ref))} | "
+                f"{fmt(np.std(ref, ddof=1))} | — | {anova_p:.4e} | — | — |"
+            )
+            # Each other workload is compared with the reference. H1 needs
+            # all of them equivalent.
+            for name in names[1:]:
+                vals = group_data[name]
+                tost_p = tost_test(ref, vals, 0.10)[0]
+                d = cohens_d(ref, vals)
+                label = "TOST" if len(names) == 2 else f"TOST_vs_{name}"
+                results.append({"test": "H1", "metric": metric, "p_value": tost_p, "test_type": label})
                 report_lines.append(
                     f"| {metric} | {name} | {len(vals)} | {fmt(np.mean(vals))} | "
                     f"{fmt(np.std(vals, ddof=1))} | {d:.2f} | {anova_p:.4e} | "
-                    f"{tost_p:.4e} | {equiv} |"
+                    f"{tost_p:.4e} | {'✅ YES' if tost_p < 0.05 else '❌ NO'} |"
                 )
     else:
         report_lines.append("> ℹ️ Only one workload group available. Add more workloads")
@@ -738,6 +752,8 @@ def main():
     parser.add_argument("dummy_csv", help="CSV from run_hypotheses_dummy.py")
     parser.add_argument("--goapi", type=str, default=None,
                         help="CSV from run_hypotheses_goapi.py")
+    parser.add_argument("--latmem", type=str, default=None,
+                        help="H1 CSV from run_hypotheses_dummy.py --workload lat_mem_rd")
     parser.add_argument("--output", type=str, default=None,
                         help="Output report path (markdown)")
     parser.add_argument("--requests", type=int, default=REQUESTS_DEFAULT,
@@ -756,9 +772,15 @@ def main():
         goapi_df = pd.read_csv(args.goapi)
         print(f"  Go API CSV: {len(goapi_df)} rows")
 
+    latmem_df = None
+    if args.latmem and os.path.exists(args.latmem):
+        latmem_df = pd.read_csv(args.latmem)
+        print(f"  lat_mem_rd CSV: {len(latmem_df)} rows")
+
     dummy_df, dq_lines = drop_invalid_runs(dummy_df, "Dummy workload")
     goapi_df, dq_goapi = drop_invalid_runs(goapi_df, "Go API")
-    dq_lines += dq_goapi
+    latmem_df, dq_latmem = drop_invalid_runs(latmem_df, "lat_mem_rd")
+    dq_lines += dq_goapi + dq_latmem
 
     all_results = []
     report = []
@@ -779,7 +801,7 @@ def main():
     report.append("")
 
     # H1
-    h1_results, h1_report = analyze_h1(dummy_df, goapi_df)
+    h1_results, h1_report = analyze_h1(dummy_df, goapi_df, latmem_df)
     all_results.extend(h1_results)
     report.extend(h1_report)
 

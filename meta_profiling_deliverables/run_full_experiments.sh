@@ -3,6 +3,7 @@
 #
 # Runs all experiments required for publication-quality results:
 #   Phase 1: Full dummy workload (H1, H2, H3)
+#   Phase 1b: H1 on lat_mem_rd (secondary workload)
 #   Phase 2: Go API experiments (H1, H4)
 #   Phase 3: Statistical analysis
 #   Phase 4: Figure generation
@@ -60,6 +61,7 @@ SESSION_DIR="${RESULTS_DIR}/session_${TIMESTAMP}"
 mkdir -p "${SESSION_DIR}"
 
 DUMMY_CSV="${SESSION_DIR}/hypotheses_dummy_${TIMESTAMP}.csv"
+LATMEM_CSV="${SESSION_DIR}/hypotheses_latmem_${TIMESTAMP}.csv"
 GOAPI_CSV="${SESSION_DIR}/hypotheses_goapi_${TIMESTAMP}.csv"
 REPORT="${SESSION_DIR}/analysis_report.md"
 FIGURES_DIR="${SESSION_DIR}/figures"
@@ -131,10 +133,17 @@ if ! python3 -c "import pandas, numpy, scipy, matplotlib" 2>/dev/null; then
     exit 1
 fi
 
+if ! command -v gcc &>/dev/null; then
+    log "ERROR: gcc not found (builds dummy_workload). Install: sudo apt install gcc"
+    exit 1
+fi
+
+HAVE_LATMEM=1
 if ! command -v lat_mem_rd &>/dev/null && \
    ! [ -f /usr/lib/lmbench/bin/x86_64-linux-gnu/lat_mem_rd ]; then
+    HAVE_LATMEM=0
     log "WARNING: lat_mem_rd not found. Install: sudo apt install lmbench"
-    log "  Dummy workload will fall back to dummy_workload binary."
+    log "  The lat_mem_rd H1 comparison will be skipped."
 fi
 
 log "Pre-flight checks complete."
@@ -153,6 +162,17 @@ if [ "${GOAPI_ONLY}" -eq 0 ]; then
             --hypothesis all)
 
     log "Phase 1 complete. CSV: ${DUMMY_CSV}"
+
+    if [ "${HAVE_LATMEM}" -eq 1 ]; then
+        log "Starting Phase 1b: H1 on lat_mem_rd (secondary workload)"
+        (cd "${SCRIPT_DIR}/dummy_workload_test" && \
+            python3 run_hypotheses_dummy.py \
+                --workload lat_mem_rd \
+                --iterations "${ITERATIONS}" \
+                --output "${LATMEM_CSV}" \
+                --hypothesis H1)
+        log "Phase 1b complete. CSV: ${LATMEM_CSV}"
+    fi
 fi
 
 # ---- Phase 2: Go API ----
@@ -195,10 +215,15 @@ if [ -f "${GOAPI_CSV}" ]; then
     GOAPI_ARGS=(--goapi "${GOAPI_CSV}")
 fi
 
+LATMEM_ARGS=()
+if [ -f "${LATMEM_CSV}" ]; then
+    LATMEM_ARGS=(--latmem "${LATMEM_CSV}")
+fi
+
 if [ -f "${DUMMY_CSV}" ]; then
     python3 "${SCRIPT_DIR}/common/analyze_hypotheses.py" \
         "${DUMMY_CSV}" \
-        "${GOAPI_ARGS[@]}" \
+        "${GOAPI_ARGS[@]}" "${LATMEM_ARGS[@]}" \
         --output "${REPORT}" > /dev/null
     log "Analysis report: ${REPORT}"
 else
@@ -210,7 +235,7 @@ if [ -f "${DUMMY_CSV}" ]; then
     log "Starting Phase 4: Figure Generation"
     python3 "${SCRIPT_DIR}/common/generate_figures.py" \
         "${DUMMY_CSV}" \
-        "${GOAPI_ARGS[@]}" \
+        "${GOAPI_ARGS[@]}" "${LATMEM_ARGS[@]}" \
         --outdir "${FIGURES_DIR}" \
         --isolcpus "$(grep -o 'isolcpus=[^ ]*' /proc/cmdline | cut -d= -f2)"
     log "Figures saved to: ${FIGURES_DIR}"

@@ -38,7 +38,7 @@ all: compile test-stat
 # ---------------------------------------------------------------------------
 compile:
 	@echo "Compiling dummy workload..."
-	gcc dummy_workload.c -o dummy_workload
+	gcc -O0 -fno-omit-frame-pointer dummy_workload.c -o dummy_workload
 
 # ---------------------------------------------------------------------------
 # Quick single-shot test (< 1 minute) — sanity check
@@ -101,7 +101,7 @@ test-stat: compile
 test-hypotheses: compile
 	@echo "=================================================================="
 	@echo "  Hypothesis Testing — H1 + H2 + H3 ($(ITERATIONS) iterations)"
-	@echo "  Workload: lat_mem_rd (lmbench) on CPU $(WORKLOAD_CPU)"
+	@echo "  Workload: dummy_workload on CPU $(WORKLOAD_CPU)"
 	@echo "  Outer ruler: bpftrace (eBPF) on CPU $(MEASURE_CPU)"
 	@echo "=================================================================="
 	sudo python3 run_hypotheses_dummy.py --iterations $(ITERATIONS)

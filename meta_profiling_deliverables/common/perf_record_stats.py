@@ -83,8 +83,8 @@ def stop_and_read(data_file):
     return read_record_stats(data_file)
 
 
-# Sampling-rate ceiling. Smallest H2 period is -c 1000; at 2.1 GHz (Turbo
-# off) that is ~2.1M samples/s, so the cap must sit well above it.
+# Sampling-rate ceiling. Smallest H2 period is -c 5000; at 2.1 GHz (Turbo
+# off) that is ~420K samples/s, so the cap must sit well above it.
 MAX_SAMPLE_RATE = 10_000_000
 
 

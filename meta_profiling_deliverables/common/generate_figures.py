@@ -31,7 +31,8 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from analyze_hypotheses import collect_h4_sources, overhead_percentages
+from analyze_hypotheses import (collect_h4_sources, drop_invalid_runs,
+                                overhead_percentages)
 
 # ---------------------------------------------------------------------------
 # Style
@@ -215,7 +216,7 @@ def plot_h3_ablation(dummy_df):
 # ---------------------------------------------------------------------------
 
 H4_LABELS = {
-    "dummy workload":       "CPU-bound (lat_mem_rd)",
+    "dummy workload":       "CPU-bound (dummy_workload)",
     "Go API workload":      "Go microservice (HTTP API)",
     "Go API workload (H1)": "Go microservice (HTTP API)",
 }
@@ -289,7 +290,7 @@ def plot_h4_equivalence(dummy_df, goapi_df):
 # Figure 4: H1 Cross-Workload Comparison
 # ---------------------------------------------------------------------------
 
-def plot_h1_crossworkload(dummy_df, goapi_df):
+def plot_h1_crossworkload(dummy_df, goapi_df, latmem_df=None):
     """H1: perf record's own hardware cost across different workloads.
 
     Bar chart with error bars showing perf record's cycles/misses
@@ -304,7 +305,13 @@ def plot_h1_crossworkload(dummy_df, goapi_df):
     h1_dummy = dummy_df[dummy_df['hypothesis'] == 'H1']
     tool_dummy = h1_dummy[h1_dummy['run_type'] == 'tool_overhead']
     if not tool_dummy.empty:
-        groups['CPU-bound\n(lat_mem_rd)'] = tool_dummy
+        groups[f"CPU-bound\n({tool_dummy['workload'].iloc[0]})"] = tool_dummy
+
+    if latmem_df is not None:
+        tool_latmem = latmem_df[(latmem_df['hypothesis'] == 'H1') &
+                                (latmem_df['run_type'] == 'tool_overhead')]
+        if not tool_latmem.empty:
+            groups['Memory sweep\n(lat_mem_rd)'] = tool_latmem
 
     if goapi_df is not None:
         h1_goapi = goapi_df[goapi_df['hypothesis'] == 'H1']
@@ -400,7 +407,7 @@ def plot_architecture_diagram(isolcpus):
     # ---- CPU role boxes (inside Layer 1) ----
     cpu_boxes = [
         # (x_center, label, color)
-        (1.6, "CPU 6\nWorkload\n(lat_mem_rd)", "#3B82F6"),
+        (1.6, "CPU 6\nWorkload", "#3B82F6"),
         (3.9, "CPU 7\nperf record\n(tool under study)", "#EF4444"),
         (6.3, "CPU 14\nperf stat\n(outer ruler)", "#10B981"),
         (8.5, "CPU 15\nReserved", "#9CA3AF"),
@@ -447,6 +454,8 @@ def main():
     parser.add_argument("dummy_csv", help="CSV from run_hypotheses_dummy.py")
     parser.add_argument("--goapi", type=str, default=None,
                         help="CSV from run_hypotheses_goapi.py")
+    parser.add_argument("--latmem", type=str, default=None,
+                        help="H1 CSV from run_hypotheses_dummy.py --workload lat_mem_rd")
     parser.add_argument("--outdir", type=str, default="figures",
                         help="Output directory for figures (default: ./figures)")
     parser.add_argument("--format", type=str, default="pdf", choices=["pdf", "png", "svg"],
@@ -468,12 +477,22 @@ def main():
         goapi_df = pd.read_csv(args.goapi)
         print(f"  Go API CSV: {len(goapi_df)} rows")
 
+    latmem_df = None
+    if args.latmem and os.path.exists(args.latmem):
+        latmem_df = pd.read_csv(args.latmem)
+        print(f"  lat_mem_rd CSV: {len(latmem_df)} rows")
+
+    # Same exclusions as the report, so figures and tables agree
+    dummy_df, _ = drop_invalid_runs(dummy_df, "Dummy workload")
+    goapi_df, _ = drop_invalid_runs(goapi_df, "Go API")
+    latmem_df, _ = drop_invalid_runs(latmem_df, "lat_mem_rd")
+
     print(f"\n  Generating figures → {OUTDIR}/\n")
 
     plot_h2_scaling(dummy_df)
     plot_h3_ablation(dummy_df)
     plot_h4_equivalence(dummy_df, goapi_df)
-    plot_h1_crossworkload(dummy_df, goapi_df)
+    plot_h1_crossworkload(dummy_df, goapi_df, latmem_df)
     plot_architecture_diagram(args.isolcpus)
 
     print(f"\n  ✅ All figures saved to {OUTDIR}/")

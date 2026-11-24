@@ -28,7 +28,7 @@ Data format:
   For H4 (ratio): tool_overhead / workload_baseline × 100%.
 
 CPU pinning (Intel Xeon E5-2620 v4, isolated: 6,7,14,15):
-  Workload (lat_mem_rd):  CPU 6  (Core 6, Socket 0)
+  Workload:               CPU 6  (Core 6, Socket 0)
   perf record:            CPU 7  (Core 7, Socket 0)
   perf stat (ruler):      CPU 14 (Core 6, Socket 1)
 
@@ -77,7 +77,9 @@ PERF_STAT_EVENTS = [
 ]
 
 # H2: sampling period configs (from most aggressive to least)
-H2_CONFIGS = [1000, 10000, 50000, 100000, 500000, 1000000]
+# -c 1000 is excluded: pilot runs lost samples every time (perf record could
+# not keep up), so it does not measure the requested rate.
+H2_CONFIGS = [5000, 10000, 50000, 100000, 500000, 1000000]
 
 # H3: -g ablation configs (label, perf record flags)
 H3_CONFIGS = [
@@ -101,61 +103,57 @@ def run_cmd(cmd, timeout=30):
         return subprocess.CompletedProcess(cmd, 1, "", "timeout")
 
 
-def start_workload():
-    """Start lat_mem_rd on the isolated CPU. Returns (PID, name).
+def start_workload(kind):
+    """Start the requested workload on the isolated CPU.
+    Returns (PID, name), or (None, None). Never substitutes another workload.
 
-    lat_mem_rd is wrapped in an infinite loop so it never terminates
-    during the experiment.  We use 'nohup bash -c ...' so the shell
-    doesn't capture the subprocess inside run_cmd's pipe.
+    dummy_workload: allocates once, then loops forever (stationary). Main
+        workload, so iterations are comparable and independent.
+    lat_mem_rd: restarted in a loop and sweeps array sizes, so its behaviour
+        varies over time. Secondary workload for the H1 comparison.
     """
-    run_cmd("pkill -9 -f lat_mem_rd 2>/dev/null")
-    run_cmd("pkill -9 -f dummy_workload 2>/dev/null")
-    time.sleep(0.5)
+    stop_workload()
 
-    # Find lat_mem_rd binary
+    if kind == "dummy_workload":
+        here = os.path.dirname(os.path.abspath(__file__))
+        src = os.path.join(here, "dummy_workload.c")
+        binary = os.path.join(here, "dummy_workload")
+        # Always rebuild so flags are known; frame pointers are for perf -g
+        build = run_cmd(f"gcc -O0 -fno-omit-frame-pointer '{src}' -o '{binary}'")
+        if build.returncode != 0:
+            print(f"  Could not build dummy_workload: {build.stderr.strip()}")
+            return None, None
+        os.system(f"nohup taskset -c {WORKLOAD_CPU} '{binary}' "
+                  f"> /dev/null 2>&1 &")
+        time.sleep(3)  # let the one-time array fill finish
+        pid = run_cmd("pgrep -x dummy_workload | head -n 1").stdout.strip()
+        return (pid, kind) if pid.isdigit() else (None, None)
+
     lat_mem_cmd = None
     if run_cmd("which lat_mem_rd").returncode == 0:
         lat_mem_cmd = "lat_mem_rd"
     elif os.path.exists("/usr/lib/lmbench/bin/x86_64-linux-gnu/lat_mem_rd"):
         lat_mem_cmd = "/usr/lib/lmbench/bin/x86_64-linux-gnu/lat_mem_rd"
-
-    if lat_mem_cmd:
-        # Infinite loop — workload never terminates during experiment
-        wrapper = f"while true; do {lat_mem_cmd} -t 128M 512; done"
-        os.system(
-            f"nohup taskset -c {WORKLOAD_CPU} bash -c '{wrapper}' "
-            f"> /dev/null 2>&1 &"
-        )
-        time.sleep(3)
-        # Find the lat_mem_rd child process (the actual workload)
-        res = run_cmd("pgrep -x lat_mem_rd | head -n 1")
-        pid = res.stdout.strip()
-        if pid.isdigit():
-            return pid, "lat_mem_rd"
-        # Try the bash wrapper itself
-        res = run_cmd("pgrep -f 'lat_mem_rd -t 128M' | head -n 1")
-        pid = res.stdout.strip()
-        if pid.isdigit():
-            return pid, "lat_mem_rd"
-
-    # Fallback to dummy_workload
-    if os.path.exists("./dummy_workload") or os.path.exists("dummy_workload.c"):
-        if not os.path.exists("./dummy_workload"):
-            run_cmd("gcc dummy_workload.c -o dummy_workload")
-        os.system(f"taskset -c {WORKLOAD_CPU} ./dummy_workload > /dev/null 2>&1 &")
-        time.sleep(1)
-        res = run_cmd("pgrep -x dummy_workload | head -n 1")
-        pid = res.stdout.strip()
-        if pid.isdigit():
-            return pid, "dummy_workload"
-
-    return None, None
+    if not lat_mem_cmd:
+        return None, None
+    # Infinite loop: the workload never terminates during the experiment
+    wrapper = f"while true; do {lat_mem_cmd} -t 128M 512; done"
+    os.system(
+        f"nohup taskset -c {WORKLOAD_CPU} bash -c '{wrapper}' "
+        f"> /dev/null 2>&1 &"
+    )
+    time.sleep(3)
+    pid = run_cmd("pgrep -x lat_mem_rd | head -n 1").stdout.strip()
+    return (pid, kind) if pid.isdigit() else (None, None)
 
 
-def stop_workload(workload_name):
-    run_cmd("pkill -9 -f 'lat_mem_rd' 2>/dev/null")
-    run_cmd("pkill -9 -f 'dummy_workload' 2>/dev/null")
-    time.sleep(0.3)
+def stop_workload():
+    # Match lat_mem_rd's arguments, not just its name: "-f lat_mem_rd" would
+    # also match (and kill) this script run with "--workload lat_mem_rd".
+    run_cmd("pkill -9 -f '[l]at_mem_rd -t 128M'")
+    run_cmd("pkill -9 -x lat_mem_rd")
+    run_cmd("pkill -9 -x dummy_workload")
+    time.sleep(0.5)
 
 
 def start_perf_record(flags="-g -c 100000"):
@@ -182,17 +180,6 @@ def start_perf_record(flags="-g -c 100000"):
 
 def stop_perf_record():
     stop_perf_record_graceful()
-
-
-def refresh_workload_pid():
-    """Re-find the lat_mem_rd PID (it changes on each loop iteration)."""
-    res = run_cmd("pgrep -x lat_mem_rd | head -n 1")
-    pid = res.stdout.strip()
-    if pid.isdigit():
-        return pid
-    res = run_cmd("pgrep -f 'lat_mem_rd -t 128M' | head -n 1")
-    pid = res.stdout.strip()
-    return pid if pid.isdigit() else None
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +458,9 @@ def main():
     parser.add_argument("--hypothesis", type=str,
                         choices=["H1", "H2", "H3", "all"], default="all",
                         help="Which hypothesis to run (default: all)")
+    parser.add_argument("--workload", choices=["dummy_workload", "lat_mem_rd"],
+                        default="dummy_workload",
+                        help="Workload on CPU 6 (default: dummy_workload)")
     parser.add_argument("--output", type=str,
                         default=f"../results/hypotheses_dummy_{SESSION_ID}.csv",
                         help="Output CSV path")
@@ -486,11 +476,11 @@ def main():
 
     # Start the workload
     print("  Starting workload...")
-    workload_pid, workload_name = start_workload()
+    workload_pid, workload_name = start_workload(args.workload)
     if not workload_pid:
-        print("  FATAL: Could not start lat_mem_rd or dummy_workload.")
-        print("  Install lmbench: sudo apt install -y lmbench")
-        return
+        print(f"  FATAL: Could not start {args.workload}.")
+        print("  dummy_workload needs gcc; lat_mem_rd needs: sudo apt install -y lmbench")
+        sys.exit(1)
     print(f"  Workload: {workload_name} (PID {workload_pid}, CPU {WORKLOAD_CPU})")
 
     # ---------------------------------------------------------------
@@ -499,14 +489,14 @@ def main():
     # on perf stat being able to count events for perf record's PID.
     # ---------------------------------------------------------------
     if not check_perf_stat_available(ruler_cpu=RULER_CPU):
-        stop_workload(workload_name)
+        stop_workload()
         return
 
     print(f"\n  Sanity check: starting perf record and measuring its PID...")
     test_perf_pid = start_perf_record("-g -c 100000")
     if not test_perf_pid:
         print("  ❌ Could not start perf record. Check permissions (run with sudo).")
-        stop_workload(workload_name)
+        stop_workload()
         return
 
     print(f"  perf record PID: {test_perf_pid}")
@@ -527,7 +517,7 @@ def main():
         print(f"    - CPU {RULER_CPU} not isolated (check: grep isolcpus /proc/cmdline)")
         print("    - perf record exited too fast (try: pgrep -x perf)")
         print("  Aborting.")
-        stop_workload(workload_name)
+        stop_workload()
         return
 
     # Also verify we can measure the workload CPU
@@ -587,7 +577,7 @@ def main():
         print("\n\n  ⚠️ Interrupted! Saving partial results...")
     finally:
         writer.close()
-        stop_workload(workload_name)
+        stop_workload()
         stop_perf_record()
 
     print(f"\n{'='*70}")

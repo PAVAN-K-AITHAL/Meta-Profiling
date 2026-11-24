@@ -152,10 +152,11 @@ if python3 -c "import pandas, numpy, scipy, matplotlib" 2>/dev/null; then
 else
     fail "root python3 missing deps: sudo apt install -y python3-pandas python3-scipy python3-matplotlib"
 fi
+if command -v gcc >/dev/null; then pass "gcc found (builds dummy_workload)"; else fail "gcc missing: sudo apt install gcc"; fi
 if command -v lat_mem_rd >/dev/null || [ -x /usr/lib/lmbench/bin/x86_64-linux-gnu/lat_mem_rd ]; then
     pass "lat_mem_rd found"
 else
-    warn "lat_mem_rd missing (sudo apt install lmbench) — falls back to dummy_workload"
+    warn "lat_mem_rd missing (sudo apt install lmbench) — lat_mem_rd H1 comparison will be skipped"
 fi
 if command -v hey >/dev/null; then pass "hey found ($(command -v hey))"; else warn "hey missing — Go API phase will be skipped (go install github.com/rakyll/hey@latest)"; fi
 API_PID="$(docker inspect --format '{{.State.Pid}}' perf-go-api 2>/dev/null || echo "")"
