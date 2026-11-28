@@ -1,0 +1,6 @@
+session_id,timestamp,hypothesis,workload,config_g,config_c,iteration,run_type,cycles,cache_misses,branch_misses,page_faults,context_switches,lost_events,throttle_events
+20261124_175016,2026-11-24T17:50:39.991316,H1,dummy_workload,on,100000,1,workload_baseline,10484136434,48042788,76987129,0,5,,
+20261124_175016,2026-11-24T17:50:47.941438,H1,dummy_workload,on,100000,1,tool_overhead,22801708,386309,53804,112,36,0,0
+20261124_175016,2026-11-24T17:50:54.991932,H1,dummy_workload,on,100000,2,workload_baseline,10484140061,48089324,76911717,0,7,,
+20261124_175016,2026-11-24T17:51:02.942994,H1,dummy_workload,on,100000,2,tool_overhead,22355605,393648,52786,78,36,0,0
+20261124_175016,2026-11-24T17:51:09.990328,H1,dummy_workload,on,100000,3,workload_baseline,10484138236,48044051,76741356,0,5,,
