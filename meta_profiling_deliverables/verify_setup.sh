@@ -162,8 +162,8 @@ if command -v hey >/dev/null; then pass "hey found ($(command -v hey))"; else wa
 API_PID="$(docker inspect --format '{{.State.Pid}}' perf-go-api 2>/dev/null || echo "")"
 if [ -n "${API_PID}" ] && [ "${API_PID}" != 0 ]; then
     pass "Go API container running (PID ${API_PID})"
-    code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost/compute || echo 000)"
-    if [ "${code}" = 200 ]; then pass "http://localhost/compute → 200"; else warn "http://localhost/compute → ${code}"; fi
+    code="$(curl -s -X POST -o /dev/null -w '%{http_code}' http://localhost/compute || echo 000)"
+    if [ "${code}" = 200 ]; then pass "POST http://localhost/compute → 200"; else warn "POST http://localhost/compute → ${code}"; fi
 else
     warn "Go API container perf-go-api not running (cd .. && docker compose up -d)"
 fi

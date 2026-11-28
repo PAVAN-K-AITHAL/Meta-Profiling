@@ -27,6 +27,8 @@ Usage:
 """
 
 import argparse
+import random
+import re
 import subprocess
 import time
 import os
@@ -54,14 +56,24 @@ WARMUP_REQUESTS = 500
 CONCURRENCY = 10
 API_URL = "http://localhost/compute"
 
-# perf stat events — 3 hardware + 2 software, no PMU multiplexing
+# perf stat events — 3 hardware + 4 software/tool, no PMU multiplexing.
+# cycles alone under-reports profiling cost: Intel's PMU interrupt handler
+# disables all counters while it runs, so time spent sampling the API is
+# invisible to cycles. task-clock (CPU time of the API's threads) and
+# duration_time (wall time of the N requests) include it.
 PERF_STAT_EVENTS = [
     "cycles",
     "L1-dcache-load-misses",
     "branch-misses",
     "context-switches",
     "page-faults",
+    "task-clock",
+    "duration_time",
 ]
+
+# Sampling periods for H4 (--periods). 100K is the production-style setting;
+# 10K shows how the cost grows when sampling is aggressive.
+DEFAULT_PERIODS = [100000]
 
 SESSION_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -92,7 +104,24 @@ def get_api_pid():
 
 
 def hey_cmd(n):
-    return f"hey -n {n} -c {CONCURRENCY} -q 500 {API_URL}"
+    # /compute is registered as POST only (microservice/main.go); a GET
+    # returns 405 in microseconds and hey still exits 0, so the method
+    # must be explicit.
+    return f"hey -n {n} -c {CONCURRENCY} -q 500 -m POST {API_URL}"
+
+
+def check_api_responses(n=20):
+    """Send n requests and require every one to return HTTP 200.
+    Returns True if the API is doing the real work."""
+    res = run_cmd(hey_cmd(n), timeout=60)
+    codes = re.findall(r"\[(\d{3})\]\s+(\d+) responses", res.stdout)
+    ok = sum(int(c) for code, c in codes if code == "200")
+    if ok != n:
+        print(f"  ❌ API check: {ok}/{n} requests returned 200. "
+              f"Status codes: {codes or res.stdout[-300:]}")
+        return False
+    print(f"  ✅ API check: {n}/{n} POST {API_URL} returned 200")
+    return True
 
 
 def send_requests(n):
@@ -149,8 +178,9 @@ class ResultsWriter:
         "config_c", "iteration", "run_type",
         "cycles", "cache_misses", "branch_misses",
         "page_faults", "context_switches", "requests_served",
+        "task_clock_ms", "duration_ns",
         # perf record data quality (rows with a profiler; >0 = invalid run)
-        "lost_events", "throttle_events",
+        "lost_events", "throttle_events", "samples",
     ]
 
     def __init__(self, output_path):
@@ -179,8 +209,11 @@ class ResultsWriter:
             "page_faults": results.get("page_faults", ""),
             "context_switches": results.get("context_switches", ""),
             "requests_served": requests,
+            "task_clock_ms": results.get("task_clock_ms", ""),
+            "duration_ns": results.get("duration_ns", ""),
             "lost_events": results.get("lost_events", ""),
             "throttle_events": results.get("throttle_events", ""),
+            "samples": results.get("samples", ""),
         }
         self.writer.writerow(row)
         self.file.flush()
@@ -240,11 +273,12 @@ def run_h1_goapi(api_pid, writer, iterations):
 # H4: Production Negligibility (TOST Equivalence)
 # ---------------------------------------------------------------------------
 
-def run_h4(api_pid, writer, iterations):
+def run_h4(api_pid, writer, iterations, periods):
     """Measure Go API WITH and WITHOUT profiler (constant work).
-    
+
     This measures the APPLICATION's own counters to capture total impact,
-    including cache pollution from perf record.
+    including cache pollution from perf record. One baseline per block,
+    then one profiled run per sampling period (order shuffled per block).
     """
     print(f"\n{'='*70}")
     print(f"  H4: Production Negligibility ({iterations} iterations)")
@@ -268,24 +302,27 @@ def run_h4(api_pid, writer, iterations):
 
         time.sleep(2)  # cooldown
 
-        # ---- Phase B: PROFILED (perf record active) ----
-        warmup()
-        perf_pid = start_perf_record(api_pid, "-g -c 100000")
-        if not perf_pid:
-            # Never record a "profiled" row with no profiler running
-            failures += 1
-            stop_perf_record()
-            continue
+        # ---- Phase B: PROFILED (perf record active), each period ----
+        shuffled = list(periods)
+        random.shuffle(shuffled)
+        for c_val in shuffled:
+            warmup()
+            perf_pid = start_perf_record(api_pid, f"-g -c {c_val}")
+            if not perf_pid:
+                # Never record a "profiled" row with no profiler running
+                failures += 1
+                stop_perf_record()
+                continue
 
-        prof_results = measure_constant_work(int(api_pid))
-        quality = stop_and_read(PERF_DATA)  # lost/throttle flags
-        if prof_results:
-            prof_results.update(quality)
-            writer.write_row("H4", "on", 100000, i+1,
-                             "profiled", prof_results, REQUESTS_PER_ITER)
-        else:
-            failures += 1
-        time.sleep(2)  # cooldown
+            prof_results = measure_constant_work(int(api_pid))
+            quality = stop_and_read(PERF_DATA)  # lost/throttle flags
+            if prof_results:
+                prof_results.update(quality)
+                writer.write_row("H4", "on", c_val, i+1,
+                                 "profiled", prof_results, REQUESTS_PER_ITER)
+            else:
+                failures += 1
+            time.sleep(2)  # cooldown
 
     print(f"\n  H4 complete. Failures: {failures}/{iterations}")
 
@@ -306,6 +343,10 @@ def main():
                         choices=["H1", "H4", "all"], default="all")
     parser.add_argument("--requests", type=int, default=REQUESTS_PER_ITER,
                         help=f"Requests per iteration (default: {REQUESTS_PER_ITER})")
+    parser.add_argument("--periods", type=str,
+                        default=",".join(str(c) for c in DEFAULT_PERIODS),
+                        help="Comma-separated perf record -c values for H4 "
+                             "(default: 100000)")
     parser.add_argument("--output", type=str,
                         default=f"../results/hypotheses_goapi_{SESSION_ID}.csv")
     args = parser.parse_args()
@@ -324,6 +365,9 @@ def main():
     if not run_cmd("which hey").stdout.strip():
         print("  ERROR: 'hey' not installed.")
         print("  Install: go install github.com/rakyll/hey@latest")
+        return
+
+    if not check_api_responses():
         return
 
     configure_sample_rate_limits()
@@ -347,7 +391,8 @@ def main():
         if args.hypothesis in ("all", "H1"):
             run_h1_goapi(api_pid, writer, args.iterations)
         if args.hypothesis in ("all", "H4"):
-            run_h4(api_pid, writer, args.iterations)
+            run_h4(api_pid, writer, args.iterations,
+                   [int(c) for c in args.periods.split(",")])
     except KeyboardInterrupt:
         print("\n\n  ⚠️ Interrupted! Saving partial results...")
     finally:
@@ -356,7 +401,7 @@ def main():
 
     print(f"\n{'='*70}")
     print(f"  ✅ COMPLETE — Results: {args.output}")
-    print(f"  Next: python3 ../common/analyze_hypotheses.py --goapi {args.output}")
+    print(f"  Next: python3 ../common/analyze_v2.py --goapi {args.output}")
     print(f"{'='*70}")
 
 

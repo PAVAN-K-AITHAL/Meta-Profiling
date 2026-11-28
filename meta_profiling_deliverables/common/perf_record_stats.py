@@ -49,10 +49,11 @@ def stop_perf_record_graceful(timeout=180):
 
 
 def read_record_stats(data_file, timeout=300):
-    """Return {'lost_events': int, 'throttle_events': int} from a perf.data
-    file, or {'lost_events': '', 'throttle_events': ''} if it can't be read
-    (empty = unknown, kept distinct from a verified 0)."""
-    unknown = {"lost_events": "", "throttle_events": ""}
+    """Return {'lost_events', 'throttle_events', 'samples'} from a perf.data
+    file, or empty strings if it can't be read (empty = unknown, kept
+    distinct from a verified 0). 'samples' is the number of SAMPLE records
+    perf record actually wrote, used to compute cost per sample."""
+    unknown = {"lost_events": "", "throttle_events": "", "samples": ""}
     try:
         res = subprocess.run(
             ["perf", "report", "-i", data_file, "--stats"],
@@ -73,13 +74,14 @@ def read_record_stats(data_file, timeout=300):
     return {
         "lost_events": counts.get("LOST", 0) + counts.get("LOST_SAMPLES", 0),
         "throttle_events": counts.get("THROTTLE", 0),
+        "samples": counts.get("SAMPLE", 0),
     }
 
 
 def stop_and_read(data_file):
     """Stop perf record gracefully and return its data-quality counters."""
     if not stop_perf_record_graceful():
-        return {"lost_events": "", "throttle_events": ""}
+        return {"lost_events": "", "throttle_events": "", "samples": ""}
     return read_record_stats(data_file)
 
 

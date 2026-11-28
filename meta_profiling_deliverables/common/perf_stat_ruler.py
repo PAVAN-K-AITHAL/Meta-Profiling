@@ -71,7 +71,39 @@ EVENT_MAP = {
     "page-faults":           "page_faults",
     "faults":                "page_faults",
     "cache-misses":          "cache_misses",
+    "instructions":          "instructions",
+    "task-clock":            "task_clock_ms",
+    "duration_time":         "duration_ns",
 }
+
+# Events whose privilege-level modifier is part of the measurement:
+# cycles:u and cycles:k are different quantities and must not overwrite each
+# other, so they map to cycles_u / cycles_k. Other events ignore modifiers
+# (perf itself appends ":u" to software events under a strict
+# perf_event_paranoid).
+_SPLIT_BY_MODIFIER = {"cycles", "instructions"}
+
+# Events reported in fractional units (task-clock is msec)
+_FLOAT_EVENTS = {"task_clock_ms"}
+
+
+def _event_key(event_field):
+    """Map a perf stat event field to the canonical key, or None.
+
+    Handles both spellings perf prints: "cycles:u" and "cpu/cycles/u".
+    """
+    if "/" in event_field:
+        parts = event_field.split("/")
+        base = parts[1]
+        mod = parts[2] if len(parts) > 2 else ""
+    else:
+        base, _, mod = event_field.partition(":")
+    canonical = EVENT_MAP.get(base)
+    if canonical is None:
+        return None
+    if base in _SPLIT_BY_MODIFIER and mod in ("u", "k"):
+        canonical = f"{canonical}_{mod}"
+    return canonical
 
 
 def _parse_perf_stat_output(stderr_text):
@@ -99,18 +131,16 @@ def _parse_perf_stat_output(stderr_text):
             continue
 
         value, event = fields[0], fields[2]
-        # Strip PMU prefixes (cpu/cycles/u) and modifiers (cycles:u)
-        if "/" in event:
-            event = event.split("/")[1]
-        event = event.split(":")[0]
-        canonical = EVENT_MAP.get(event)
+        canonical = _event_key(event)
         if canonical is None:
             continue
 
         try:
-            count = int(float(value))
+            count = float(value)
         except ValueError:
             continue  # <not counted> / <not supported>
+        if canonical not in _FLOAT_EVENTS:
+            count = int(count)
 
         if len(fields) >= 5 and fields[4]:
             try:
@@ -227,6 +257,20 @@ def measure_pid_during_command(target_pid, command, ruler_cpu="14",
         timeout=timeout, verbose=verbose,
         allow_multiplexed=allow_multiplexed, require_success=True,
     )
+
+
+def measure_concurrently(*jobs):
+    """Run several measure_* calls over the same window, in parallel.
+
+    Each job is (function, args_tuple, kwargs_dict). Returns the results in
+    job order. Used to count perf record's own process (-p) and the workload
+    CPU (-C 6) during one and the same profiled window. Both perf stat
+    processes run on the ruler CPU and are idle while counting.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = [pool.submit(fn, *args, **kwargs) for fn, args, kwargs in jobs]
+        return [f.result() for f in futures]
 
 
 def check_perf_stat_available(ruler_cpu="14", verbose=True):
