@@ -1,7 +1,10 @@
 /*
  * synth_wl.c — controllable synthetic workload for the cross-workload test.
  *
- *   synth_wl <stack_depth> <working_set_MB>
+ *   synth_wl <stack_depth> <working_set_MB> [steps]
+ *
+ * With [steps], exits after steps × 1024 dependent loads (fixed work, for
+ * wall-clock cross-checks); without it, runs forever.
  *
  * Recurses <stack_depth> frames deep, then chases pointers forever through a
  * random cyclic permutation of <working_set_MB> MB:
@@ -29,7 +32,7 @@
 
 static size_t *next_idx;
 static volatile size_t sink;
-static volatile int keep_running = 1;   /* never cleared; lets the base case "return" */
+static long steps_arg = -1;             /* < 0: run forever */
 static char *stack_top;                 /* address of a local in main() */
 static int depth_arg;
 static long mb_arg;
@@ -45,7 +48,7 @@ static void __attribute__((noinline)) chase_forever(void)
         fclose(f);
     }
     size_t p = 0;
-    while (keep_running) {
+    for (long s = 0; steps_arg < 0 || s < steps_arg; s++) {
         /* 1024 dependent loads per outer step; the store keeps the loop alive */
         for (int i = 0; i < 1024; i++)
             p = next_idx[p];
@@ -78,10 +81,12 @@ int main(int argc, char **argv)
 {
     char top;
     stack_top = &top;
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s <stack_depth 1..120> <working_set_MB>\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: %s <stack_depth 1..120> <working_set_MB> [steps]\n", argv[0]);
         return 2;
     }
+    if (argc == 4)
+        steps_arg = atol(argv[3]);
     int depth = atoi(argv[1]);
     long mb = atol(argv[2]);
     if (depth < 1 || depth > 120 || mb < 1) {

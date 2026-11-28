@@ -8,17 +8,18 @@
 # Usage:
 #   sudo bash run_paper_experiments.sh check            # pre-flight only (~1 min)
 #   sudo bash run_paper_experiments.sh pilot            # 10-iteration smoke test (~5 min)
-#   sudo bash run_paper_experiments.sh all              # every phase below (~8 h, run overnight)
+#   sudo bash run_paper_experiments.sh all              # every phase below (~10 h, run overnight)
 #   sudo bash run_paper_experiments.sh h2 h3            # selected phases
 #   sudo bash run_paper_experiments.sh --session NAME h1w   # add to / resume an existing session
 #
 # Phases (default iterations):
 #   h1      perf record -g -c 100K on dummy_workload        100 iters   ~35 min
-#   h2      sampling-period sweep, 8 periods               50 blocks   ~1 h 45 min
+#   xcheck  wall-clock check: fixed work timed with/without perf record   ~10 min
+#   h2      sampling-period sweep, 10 periods              50 blocks   ~2 h 10 min
 #   h3      call-graph modes on dummy_workload             50 blocks   ~1 h
 #   h3deep  call-graph modes on synth_wl depth 64          50 blocks   ~1 h
 #   h1w     7 workloads (stack depth × working set)        30 blocks   ~1 h 30 min
-#   goapi   Go API: perf record's cost + H4 at -c 100K, 10K 100 iters  ~1 h 30 min
+#   goapi   Go API: perf record's cost + H4 at -c 20M/500K/100K  100 iters  ~2 h
 #   analyze report + figures from everything in the session
 #
 # A phase whose CSV already exists in the session is skipped, so after a
@@ -37,8 +38,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --session)      SESSION="$2"; shift 2 ;;
         --iterations=*) ITERS_OVERRIDE="${1#*=}"; shift ;;
-        check|pilot|h1|h2|h3|h3deep|h1w|goapi|analyze) PHASES+=("$1"); shift ;;
-        all)            PHASES+=(h1 h2 h3 h3deep h1w goapi analyze); shift ;;
+        check|pilot|xcheck|h1|h2|h3|h3deep|h1w|goapi|analyze) PHASES+=("$1"); shift ;;
+        all)            PHASES+=(xcheck h1 h2 h3 h3deep h1w goapi analyze); shift ;;
         *) echo "Unknown argument: $1" >&2; sed -n 2,26p "$0"; exit 2 ;;
     esac
 done
@@ -86,6 +87,7 @@ preflight() {
     grep -q isolcpus /proc/cmdline || { log "ERROR: isolcpus not set (see run_full_experiments.sh)"; exit 1; }
     command -v perf >/dev/null || { log "ERROR: perf not installed"; exit 1; }
     command -v gcc >/dev/null || { log "ERROR: gcc not installed"; exit 1; }
+    command -v bc >/dev/null || { log "ERROR: bc not installed (sudo apt install bc)"; exit 1; }
     python3 -c "import pandas, numpy, scipy, matplotlib" 2>/dev/null || {
         log "ERROR: root's python3 lacks pandas/numpy/scipy/matplotlib:"
         log "  sudo apt install -y python3-pandas python3-scipy python3-matplotlib"; exit 1; }
@@ -138,9 +140,64 @@ run_goapi_phase() {
     log "Phase goapi: starting"
     (cd "${SCRIPT_DIR}/go_api_test" && \
         python3 run_hypotheses_goapi.py --iterations "$(iters 100)" \
-            --periods 100000,10000 --output "${csv}.partial") 2>&1 | tee -a "${OUT}/goapi.log"
+            --periods 20000000,500000,100000 --output "${csv}.partial") 2>&1 | tee -a "${OUT}/goapi.log"
     mv "${csv}.partial" "${csv}"
     log "Phase goapi: done — $(($(wc -l < "${csv}") - 1)) rows"
+}
+
+# Wall-clock cross-check, independent of every PMU counter: synth_wl does a
+# fixed amount of work (depth 3, 1 MB) and is timed with no profiler and with
+# perf record -g at each period, in alternating order.
+run_xcheck_phase() {
+    local csv="${OUT}/xcheck.csv"
+    if [ -f "${csv}" ]; then
+        log "Phase xcheck: ${csv} exists — skipping"
+        return
+    fi
+    local dir="${SCRIPT_DIR}/dummy_workload_test" bin
+    bin="${dir}/synth_wl"
+    gcc -O2 -fno-omit-frame-pointer -fno-optimize-sibling-calls "${dir}/synth_wl.c" -o "${bin}"
+    pkill -9 -x dummy_workload 2>/dev/null || true
+    pkill -9 -x synth_wl 2>/dev/null || true
+
+    run_once() {  # prints elapsed seconds of one fixed-work run on CPU 6
+        local t0 t1
+        t0=$(date +%s%N)
+        taskset -c 6 "${bin}" 3 1 "$1" >/dev/null
+        t1=$(date +%s%N)
+        echo "scale=6; (${t1} - ${t0}) / 1000000000" | bc
+    }
+    # Calibrate to ~5 s with no profiler
+    local probe steps
+    probe=$(run_once 20000)
+    steps=$(echo "20000 * 5 / ${probe}" | bc)
+    log "Phase xcheck: ${steps} steps ≈ 5 s per run"
+
+    echo "rep,config_c,seconds,lost_events,throttle_events" > "${csv}.partial"
+    local rep c secs q
+    for rep in $(seq 1 10); do
+        for c in $(printf '%s\n' 0 100000 500000 20000000 | shuf); do
+            if [ "${c}" = 0 ]; then
+                secs=$(run_once "${steps}")
+                echo "${rep},0,${secs},," >> "${csv}.partial"
+            else
+                taskset -c 7 perf record -g -e cycles -c "${c}" -C 6 -o /tmp/perf-xcheck.data \
+                    >/dev/null 2>&1 &
+                sleep 1
+                secs=$(run_once "${steps}")
+                pkill -INT -x perf || true
+                while pgrep -x perf >/dev/null; do sleep 0.2; done
+                q=$(perf report -i /tmp/perf-xcheck.data --stats 2>/dev/null | awk '
+                    /LOST(_SAMPLES)? events:/ {l += $3} /THROTTLE events:/ {t += $3}
+                    END {printf "%d,%d", l, t}')
+                echo "${rep},${c},${secs},${q}" >> "${csv}.partial"
+            fi
+            sleep 2
+        done
+        log "Phase xcheck: rep ${rep}/10"
+    done
+    mv "${csv}.partial" "${csv}"
+    log "Phase xcheck: done"
 }
 
 analyze() {
@@ -149,7 +206,11 @@ analyze() {
     local args=() goapi=""
     for f in "${dir}"/*.csv; do
         [ -e "$f" ] || continue
-        if [ "$(basename "$f")" = goapi.csv ]; then goapi="$f"; else args+=("$f"); fi
+        case "$(basename "$f")" in
+            goapi.csv)  goapi="$f" ;;
+            xcheck.csv) args+=(--xcheck "$f") ;;
+            *)          args+=("$f") ;;
+        esac
     done
     [ -n "${goapi}" ] && args+=(--goapi "${goapi}")
     if [ ${#args[@]} -eq 0 ]; then
@@ -179,6 +240,7 @@ for phase in "${PHASES[@]}"; do
                     --size-mb 1 --iterations "$(iters 50)" ;;
         h1w)    run_dummy_phase h1w --hypothesis H1W --iterations "$(iters 30)" ;;
         goapi)  run_goapi_phase ;;
+        xcheck) run_xcheck_phase ;;
         analyze) analyze ;;
     esac
 done

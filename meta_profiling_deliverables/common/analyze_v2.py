@@ -199,7 +199,15 @@ def build_windows(df, window_s):
     w["window_cycles"] = b_tot
     w["tool_pct"] = 100 * w.t_cycles / b_tot
     w["tool_core_pct"] = 100 * w.t_task_ms / (window_s * 1000)
-    w["l1_increase_pct"] = 100 * (w.p_cache_misses / w.b_cache_misses - 1)
+    # L1 misses per 1K user instructions (CPU 6 does less work when profiled)
+    w["l1_increase_pct"] = 100 * ((w.p_cache_misses / w.p_instructions_u) /
+                                  (w.b_cache_misses / w.b_instructions_u) - 1)
+    # Samples inside the window. perf.data's count covers perf record's whole
+    # lifetime (start-up and shutdown included, ~6% more). The sampling
+    # counter counts the same cycles as ours (u+k, off in the PMU handler),
+    # so counted cycles / period is the in-window sample count.
+    w["samples_file"] = w.samples
+    w["samples"] = (w.p_cycles_u + w.p_cycles_k) / w.config_c
     s = w.samples.where(w.samples > 0)
     w["cyc_per_sample"] = w.user_lost / s
     w["tool_cyc_per_sample"] = w.t_cycles / s
@@ -270,17 +278,22 @@ def section_h1(w, pv, margins):
         return []
     out = ["## H1 / H4 — perf record -g -c 100K", ""]
     out += summary_table(x.groupby("workload"), "Cost to the workload and to the machine")
-    out += ["### Decomposition of CPU 6 cycles (mean per 5 s window)", "",
-            "| Workload | Window cycles | User cycles lost | Kernel cycles added | Uncounted | "
-            "perf record cycles (CPU 7) | Old-method ratio |",
+    out += ["### perf's own work vs. its effect on the workload (mean per 5 s window)", "",
+            "| Workload | perf record process (CPU 7) | perf kernel work, counted (CPU 6) | "
+            "perf kernel work, uncounted (CPU 6) | **perf's own work, total** | "
+            "Share seen by old method | Workload IPC loss (pollution) |",
             "|---|---|---|---|---|---|---|"]
     for wl, g in x.groupby("workload"):
-        out.append(f"| {wl} | {fmt(g.window_cycles.mean())} | {fmt(g.user_lost.mean())} | "
-                   f"{fmt(g.kernel_added.mean())} | {fmt(g.uncounted.mean())} | "
-                   f"{fmt(g.t_cycles.mean())} | {g.tool_pct.mean():.3f}% |")
+        own = g.t_cycles + g.kernel_added + g.uncounted
+        out.append(f"| {wl} | {fmt(g.t_cycles.mean())} | {fmt(g.kernel_added.mean())} | "
+                   f"{fmt(g.uncounted.mean())} | **{fmt(own.mean())}** "
+                   f"({100 * own.mean() / g.window_cycles.mean():.2f}% of a core) | "
+                   f"{100 * g.t_cycles.mean() / own.mean():.1f}% | {g.ipc_loss_pct.mean():.3f}% |")
     out.append("")
-    out.append("*Old-method ratio* is perf record's PID cycles / workload cycles: "
-               "the number earlier drafts reported.")
+    out.append("*perf's own work* = everything perf executes: its process on CPU 7 plus "
+               "its interrupt/unwinding work in the kernel on CPU 6. The old method "
+               "(perf stat on perf record's PID) sees only the first column. "
+               "*IPC loss* is indirect: the workload's own code running slower afterwards.")
     out.append("")
     out += ["### H4 — TOST on slowdown (percentage points)", "",
             "| Workload | Mean slowdown | 90% CI | " +
@@ -456,6 +469,38 @@ def section_h1w(w, pv):
     return out
 
 
+def section_xcheck(path, pv):
+    """Wall-clock cross-check: fixed work timed with and without perf record."""
+    if not path:
+        return []
+    x = pd.read_csv(path)
+    out = ["## Wall-clock cross-check (no PMU counters involved)", "",
+           "synth_wl (depth 3, 1 MB) does a fixed amount of work on CPU 6; each run is "
+           "timed with no profiler and with perf record -g at each period.", "",
+           "| -c | Runs | Seconds | Extra time vs. no profiler | Implied slowdown |",
+           "|---|---|---|---|---|"]
+    base = x[x.config_c == 0].set_index("rep").seconds
+    for c, g in sorted(x.groupby("config_c"), key=lambda kv: kv[0]):
+        if c == 0:
+            out.append(f"| none | {len(g)} | {ci_str(g.seconds)} | — | — |")
+            continue
+        bad = (g.lost_events.fillna(0) > 0) | (g.throttle_events.fillna(0) > 0)
+        g = g[~bad].set_index("rep")
+        extra = 100 * (g.seconds / base.reindex(g.index) - 1)
+        implied = 100 * (1 - base.reindex(g.index) / g.seconds)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            p = stats.wilcoxon(extra.dropna()).pvalue if extra.notna().sum() >= 5 else math.nan
+        pv.add("Wall-clock check", f"-c {int(c)} extra time > 0", p)
+        out.append(f"| {fmt(c)} | {len(g)} | {ci_str(g.seconds)} | {ci_str(extra, '%', 2)} | "
+                   f"{ci_str(implied, '%', 2)} |")
+    out.append("")
+    out.append("*Implied slowdown* = 1 − t(no profiler) / t(profiled): directly comparable "
+               "to the counter-based slowdown at the same period.")
+    out.append("")
+    return out
+
+
 def section_goapi(paths, pv, margins):
     if not paths:
         return []
@@ -575,6 +620,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("csv", nargs="*", help="CSV(s) from run_hypotheses_dummy.py")
     ap.add_argument("--goapi", nargs="*", default=[], help="CSV(s) from run_hypotheses_goapi.py")
+    ap.add_argument("--xcheck", help="xcheck.csv from run_paper_experiments.sh")
     ap.add_argument("--output", help="Write the report here (default: print)")
     ap.add_argument("--figures", help="Directory for PDF figures")
     ap.add_argument("--window", type=float, default=5.0,
@@ -602,6 +648,7 @@ def main():
             if args.figures:
                 made = figures(w, args.figures)
                 out += ["## Figures", ""] + [f"- `{p}`" for p in made] + [""]
+    out += section_xcheck(args.xcheck, pv)
     out += section_goapi(args.goapi, pv, margins)
     out += ["## Holm-Bonferroni correction (all tests above)", ""] + pv.table() + [""]
 

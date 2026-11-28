@@ -44,6 +44,16 @@ overhead with hardware counters underestimates it.
 For the Go API (constant work), the same blind spot is handled by recording
 `task-clock` (CPU time) and `duration_time` (wall time) next to `cycles`.
 
+## Pilot result (Nov 28, `results/paper_20261128_205641/pilot/`)
+
+At `-g -c 100K` (~21K samples/s) the dummy workload loses **9.8%** of its work. perf's own
+work is ~4 µs per sample (≈4,500 cycles of visible kernel work + ≈3,900 cycles inside the
+interrupt handler, where the counters are off), linear in the sample count (R² > 0.999).
+perf record's own process, the only thing the old method measured, is 2% of perf's
+total work. At `-c 5K` CPU 6 does almost nothing but take samples. Open questions for the
+full run: is there a fixed per-window cost (~0.9%) that matters at continuous-profiling
+rates (`-c 20M`), and does the wall-clock check agree with the counters.
+
 ## Revised hypotheses
 
 | | Old | New |
@@ -74,7 +84,7 @@ sudo bash run_paper_experiments.sh pilot     # ~10 min → results/paper_*/pilot
   in `kernel cycles` instead, and the paper text changes accordingly
 - the Go API check printed `20/20 ... returned 200`
 
-Then the full campaign, overnight (~8 h). Use `tmux` so a dropped SSH session doesn't
+Then the full campaign, overnight (~10 h). Use `tmux` so a dropped SSH session doesn't
 kill it:
 
 ```
@@ -86,12 +96,13 @@ sudo bash run_paper_experiments.sh all
 
 | Phase | What | Size | Time |
 |---|---|---|---|
+| `xcheck` | fixed work timed on the clock, no profiler vs `-c 100K / 500K / 20M` — checks the counters | 10 reps | ~10 min |
 | `h1` | `-g -c 100K` on dummy_workload | 100 iters | ~35 min |
-| `h2` | 8 periods 5K…1M, randomized blocks | 50 blocks | ~1 h 45 min |
+| `h2` | 10 periods 5K…20M (20M ≈ 100 Hz continuous profiling, 500K ≈ perf default), randomized blocks | 50 blocks | ~2 h 10 min |
 | `h3` | none / fp / LBR / DWARF on dummy_workload | 50 blocks | ~1 h |
 | `h3deep` | same on synth_wl, stack depth 64 | 50 blocks | ~1 h |
 | `h1w` | dummy + synth_wl depth {1,16,64,120} × working set {1, 256 MB} | 30 blocks | ~1 h 30 min |
-| `goapi` | perf record's cost + H4 at `-c 100K` and `10K` (POST, constant work) | 100 iters | ~1 h 30 min |
+| `goapi` | perf record's cost + H4 at `-c 20M / 500K / 100K` (POST, constant work) | 100 iters | ~2 h |
 | `analyze` | `report.md` + figures for the whole session | | 1 min |
 
 Then commit the session folder (`results/paper_<timestamp>/`) and push.

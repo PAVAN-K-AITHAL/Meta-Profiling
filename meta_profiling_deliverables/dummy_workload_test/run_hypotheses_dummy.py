@@ -122,9 +122,11 @@ PROFILED_EVENTS = [
     "page-faults",
 ]
 
-# H2: sampling periods. 5000 sits beyond the cliff seen in the Nov 24 pilot
-# (perf record saturates a core); 7500 and 20000 locate it.
-H2_CONFIGS = [5000, 7500, 10000, 20000, 50000, 100000, 500000, 1000000]
+# H2: sampling periods (cycles; 2.1 GHz with Turbo off). 5000 is past the
+# cliff (CPU 6 does almost nothing but take samples). 500K ≈ perf's default
+# -F 4000; 2M ≈ 1 kHz; 20M ≈ 100 Hz, the rate continuous profilers use.
+H2_CONFIGS = [5000, 7500, 10000, 20000, 50000, 100000, 500000, 1000000,
+              2000000, 20000000]
 
 # H3: call-graph modes at -c 100K (config_g label, perf record flags)
 H3_CONFIGS = [
