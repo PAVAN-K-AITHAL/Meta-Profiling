@@ -145,7 +145,7 @@ def _parse_perf_stat_output(stderr_text):
         if len(fields) >= 5 and fields[4]:
             try:
                 if float(fields[4]) < 100.0:
-                    multiplexed.append(event)
+                    multiplexed.append(f"{event} running {float(fields[4]):.1f}%")
             except ValueError:
                 pass
 

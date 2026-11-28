@@ -100,6 +100,9 @@ def configure_sample_rate_limits():
     and print "perf: interrupt took too long ..."). Not persistent across
     reboots. Returns the values actually in effect.
     """
+    # If a previous run already set the percent to 0, the rate write fails
+    # with EINVAL; re-enable the percent first so the order always works.
+    subprocess.run(["sysctl", "-q", "-w", "kernel.perf_cpu_time_max_percent=25"])
     subprocess.run(["sysctl", "-q", "-w",
                     f"kernel.perf_event_max_sample_rate={MAX_SAMPLE_RATE}"])
     subprocess.run(["sysctl", "-q", "-w", "kernel.perf_cpu_time_max_percent=0"])

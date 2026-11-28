@@ -86,11 +86,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Run with kernel.nmi_watchdog=0, or the watchdog takes one counter.
 
 # perf record's own process (counted on CPU 7's PMU; perf record's sampling
-# counter is on CPU 6, so nothing is shared)
+# counter is on CPU 6). Only fixed-counter and software events: the
+# Nov 28 pilot saw L1-dcache-load-misses and branch-misses multiplexed here
+# while CPU 6 was counted at the same time. cycles and instructions each have
+# a dedicated fixed counter, so they cannot be multiplexed.
 TOOL_EVENTS = [
     "cycles",
-    "L1-dcache-load-misses",
-    "branch-misses",
+    "instructions",
     "context-switches",
     "page-faults",
     "task-clock",
